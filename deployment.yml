@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: ipam
-          image: git.jdbnet.co.uk/public/ipam:dev
+          image: cr.jdbnet.co.uk/public/ipam:dev
           imagePullPolicy: Always
           ports:
             - containerPort: 5000
