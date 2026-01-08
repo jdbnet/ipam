@@ -2615,7 +2615,7 @@ def register_routes(app, limiter=None):
         
         try:
             # Get current version from environment
-            current_version = os.environ.get('VERSION', 'unknown')
+            current_version = os.environ.get('VERSION', 'unknown').lstrip('v')
             
             # Fetch latest release from Gitea
             response = requests.get('https://git.jdbnet.co.uk/api/v1/repos/jamie/ipam/releases/latest', timeout=5)
