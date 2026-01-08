@@ -27,14 +27,7 @@ limiter = Limiter(
 
 @app.context_processor
 def inject_env_vars():
-    version = 'unknown'
-    try:
-        version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VERSION')
-        if os.path.exists(version_file):
-            with open(version_file, 'r') as f:
-                version = f.read().strip()
-    except Exception:
-        pass
+    version = os.environ.get('VERSION', 'unknown')
     
     # Import has_permission and is_feature_enabled from routes after routes are registered
     from routes import has_permission, is_feature_enabled

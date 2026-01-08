@@ -2605,7 +2605,7 @@ def register_routes(app, limiter=None):
     @app.route('/check_update')
     @login_required
     def check_update():
-        """Check for available updates from GitHub (cached for 3 hours)"""
+        """Check for available updates from Gitea (cached for 3 hours)"""
         cache_key = 'check_update'
         
         # Check cache first
@@ -2614,15 +2614,11 @@ def register_routes(app, limiter=None):
             return jsonify(cached_result)
         
         try:
-            # Get current version
-            version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VERSION')
-            current_version = 'unknown'
-            if os.path.exists(version_file):
-                with open(version_file, 'r') as f:
-                    current_version = f.read().strip()
+            # Get current version from environment
+            current_version = os.environ.get('VERSION', 'unknown')
             
-            # Fetch latest release from GitHub
-            response = requests.get('https://api.github.com/repos/JDB-NET/ipam/releases/latest', timeout=5)
+            # Fetch latest release from Gitea
+            response = requests.get('https://git.jdbnet.co.uk/api/v1/repos/jamie/ipam/releases/latest', timeout=5)
             if response.status_code != 200:
                 return jsonify({'error': 'Failed to fetch release information'}), 500
             
