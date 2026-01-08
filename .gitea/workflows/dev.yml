@@ -33,4 +33,4 @@ jobs:
 
       - name: Deploy to Kubernetes
         run: |
-          sudo kubectl replace -f deployment.yml --grace-period=60 --force
+          sudo kubectl replace -f deployment-dev.yml --grace-period=60 --force
