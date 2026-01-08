@@ -16,9 +16,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 const compareLink = document.getElementById('toast-compare-link');
                 const closeBtn = document.getElementById('toast-close');
                 
-                // Set versions
-                currentVersionEl.textContent = 'v' + data.current_version;
-                latestVersionEl.textContent = 'v' + data.latest_version;
+                // Set versions (don't add 'v' prefix for dev versions)
+                currentVersionEl.textContent = (data.current_version === 'dev' ? '' : 'v') + data.current_version;
+                latestVersionEl.textContent = (data.latest_version === 'dev' ? '' : 'v') + data.latest_version;
                 
                 // Set compare link (current version to latest version)
                 compareLink.href = `https://git.jdbnet.co.uk/jamie/ipam/compare/v${data.current_version}...v${data.latest_version}`;
