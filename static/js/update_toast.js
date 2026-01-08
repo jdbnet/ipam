@@ -21,7 +21,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 latestVersionEl.textContent = 'v' + data.latest_version;
                 
                 // Set compare link (current version to latest version)
-                compareLink.href = `https://github.com/JDB-NET/ipam/compare/v${data.current_version}...v${data.latest_version}`;
+                compareLink.href = `https://git.jdbnet.co.uk/jamie/ipam/compare/v${data.current_version}...v${data.latest_version}`;
                 
                 // Show toast
                 toast.classList.remove('hidden');
