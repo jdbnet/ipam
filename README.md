@@ -40,7 +40,7 @@ docker run -d \
   -e SECRET_KEY=your_secret_key \
   -e NAME="Your Organisation" \
   -e LOGO_PNG="https://example.com/logo.png" \
-  ghcr.io/jdb-net/ipam:latest
+  cr.jdbnet.co.uk/public/ipam:latest
 ```
 
 ### Docker Compose
@@ -48,7 +48,7 @@ docker run -d \
 ```yaml
 services:
   ipam:
-    image: ghcr.io/jdb-net/ipam:latest
+    image: cr.jdbnet.co.uk/public/ipam:latest
     container_name: ipam
     restart: unless-stopped
     ports:
@@ -247,7 +247,7 @@ spec:
     spec:
       containers:
       - name: ipam
-        image: ghcr.io/jdb-net/ipam:latest
+        image: cr.jdbnet.co.uk/public/ipam:latest
         ports:
         - containerPort: 5000
         env:
