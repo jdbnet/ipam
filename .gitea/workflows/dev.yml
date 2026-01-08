@@ -1,13 +1,12 @@
 name: Dev
 
 on:
-  pull_request:
+  push:
     branches:
       - "**"
 
 jobs:
-  release:
-    if: github.event.pull_request.merged == true && startsWith(github.head_ref, 'v')
+  build:
     runs-on: build-htz-01
     steps:
       - name: Checkout
