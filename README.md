@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://projects.jdbnet.co.uk/ipam/img/favicon.png" alt="IPAM" width="200" />
+  <img src="https://assets.jdbnet.co.uk/projects/ipam.png" alt="IPAM" width="200" />
   
   # IP Address Management
 </div>
