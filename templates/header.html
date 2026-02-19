@@ -1,4 +1,4 @@
-<header class="bg-zinc-800 shadow-md py-3 px-6 flex items-center justify-between relative">
+<header class="bg-zinc-800 shadow-md py-3 px-6 relative flex items-center justify-between lg:grid lg:grid-cols-[auto_minmax(18rem,1fr)_auto] lg:gap-6">
     <div class="flex items-center space-x-3 flex-shrink-0">
         <a href="/" class="flex items-center space-x-3">
             <img src="{{ LOGO_PNG }}" alt="Logo" class="h-8 rounded">
@@ -6,17 +6,19 @@
         </a>
         <a href="https://git.jdbnet.co.uk/jamie/ipam/releases" target="_blank" rel="noopener noreferrer" class="text-sm font-normal text-gray-300 hover:text-gray-100 -ml-1 mt-3">{{ VERSION }}</a>
     </div>
-    <div class="hidden lg:flex items-center justify-center absolute left-1/2" style="transform: translateX(calc(-50% + 1.5rem));">
-        <form action="/search" method="GET" class="flex items-center space-x-2">
-            <input type="text" name="q" id="search-input" placeholder="Search..." 
-                   class="bg-zinc-700 text-white placeholder-gray-400 px-4 py-2 rounded-md text-base focus:outline-none focus:ring-2 focus:ring-gray-500 w-100"
+
+    <div class="hidden lg:flex items-center min-w-0">
+        <form action="/search" method="GET" class="flex items-center space-x-2 w-full max-w-2xl mx-auto">
+            <input type="text" name="q" id="search-input" placeholder="Search..."
+                   class="bg-zinc-700 text-white placeholder-gray-400 px-4 py-2 rounded-md text-base focus:outline-none focus:ring-2 focus:ring-gray-500 w-full min-w-0"
                    value="{{ request.args.get('q', '') }}">
             <button type="submit" class="text-gray-200 hover:text-gray-400 hover:cursor-pointer flex-shrink-0">
                 <i class="fas fa-search"></i>
             </button>
         </form>
     </div>
-    <nav class="hidden lg:flex items-center space-x-6 flex-shrink-0" id="main-nav">
+
+    <nav class="hidden lg:flex items-center space-x-6 flex-shrink-0 whitespace-nowrap justify-self-end" id="main-nav">
         {% if has_permission('view_index') %}
         <a href="/" class="text-gray-200 hover:text-gray-400 font-medium flex items-center gap-2">
             <i class="fas fa-home"></i>
