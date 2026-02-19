@@ -34,7 +34,7 @@ def inject_env_vars():
     
     return {
         'NAME': os.environ.get('NAME', 'JDB-NET'),
-        'LOGO_PNG': os.environ.get('LOGO_PNG', 'https://assets.s3.jdbnet.co.uk/logo/128x128.png'),
+        'LOGO_PNG': os.environ.get('LOGO_PNG', 'https://assets.jdbnet.co.uk/logo/128x128.png'),
         'VERSION': version,
         'has_permission': has_permission,
         'is_feature_enabled': is_feature_enabled
