@@ -4,7 +4,8 @@ CHANGELOG.md
 *.md
 
 # Deployment files
-deployment.yml
+deployment-dev.yml
+deployment-prod.yml
 run.sh
 Dockerfile
 .dockerignore
