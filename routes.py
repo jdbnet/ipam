@@ -631,8 +631,15 @@ def prewarm_cache(app):
                             cursor.execute('SELECT id, name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
                             subnet_row = cursor.fetchone()
                             if subnet_row:
-                                cursor.execute('SELECT id, ip, hostname, notes FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-                                ip_addresses = cursor.fetchall()
+                                cursor.execute('''
+                                    SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
+                                    FROM IPAddress ip
+                                    LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+                                    LEFT JOIN Device d ON dia.device_id = d.id
+                                    WHERE ip.subnet_id = %s
+                                    ORDER BY INET_ATON(ip.ip)
+                                ''', (subnet_id,))
+                                ip_addresses_with_device = cursor.fetchall()
                                 
                                 cursor.execute('SELECT COUNT(*) FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
                                 total_ips = cursor.fetchone()[0]
@@ -660,23 +667,6 @@ def prewarm_cache(app):
                                     'available': available_ips,
                                     'percent': round(utilization_percent, 1)
                                 }
-                                
-                                cursor.execute('SELECT id, name, description FROM Device')
-                                devices = cursor.fetchall()
-                                device_name_map = {name.lower(): (id, description) for id, name, description in devices}
-                                ip_addresses_with_device = []
-                                for ip in ip_addresses:
-                                    ip_id = ip[0]
-                                    ip_address = ip[1]
-                                    hostname = ip[2]
-                                    ip_notes = ip[3] if len(ip) > 3 else None
-                                    device_id = None
-                                    device_description = None
-                                    if hostname:
-                                        match = device_name_map.get(hostname.lower())
-                                        if match:
-                                            device_id, device_description = match
-                                    ip_addresses_with_device.append((ip_id, ip_address, hostname, device_id, device_description, ip_notes))
                                 
                                 subnet_dict = {'id': subnet_row[0], 'name': subnet_row[1], 'cidr': subnet_row[2]}
                                 result = {
@@ -1500,8 +1490,15 @@ def register_routes(app, limiter=None):
             cursor = conn.cursor()
             cursor.execute('SELECT id, name, cidr, vlan_id, vlan_description, vlan_notes FROM Subnet WHERE id = %s', (subnet_id,))
             subnet = cursor.fetchone()
-            cursor.execute('SELECT id, ip, hostname, notes FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-            ip_addresses = cursor.fetchall()
+            cursor.execute('''
+                SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
+                FROM IPAddress ip
+                LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+                LEFT JOIN Device d ON dia.device_id = d.id
+                WHERE ip.subnet_id = %s
+                ORDER BY INET_ATON(ip.ip)
+            ''', (subnet_id,))
+            ip_addresses_with_device = cursor.fetchall()
             
             # Calculate utilization stats
             cursor.execute('SELECT COUNT(*) FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
@@ -1533,23 +1530,6 @@ def register_routes(app, limiter=None):
             
             # Get custom fields for subnet
             custom_fields = get_custom_fields_for_entity('subnet', subnet_id, conn=conn)
-            
-            cursor.execute('SELECT id, name, description FROM Device')
-            devices = cursor.fetchall()
-            device_name_map = {name.lower(): (id, description) for id, name, description in devices}
-            ip_addresses_with_device = []
-            for ip in ip_addresses:
-                ip_id = ip[0]
-                ip_address = ip[1]
-                hostname = ip[2]
-                ip_notes = ip[3] if len(ip) > 3 else None
-                device_id = None
-                device_description = None
-                if hostname:
-                    match = device_name_map.get(hostname.lower())
-                    if match:
-                        device_id, device_description = match
-                ip_addresses_with_device.append((ip_id, ip_address, hostname, device_id, device_description, ip_notes))
             
             subnet_dict = {
                 'id': subnet[0], 
@@ -3139,24 +3119,15 @@ def register_routes(app, limiter=None):
             subnet = cursor.fetchone()
             if not subnet:
                 return 'Subnet not found', 404
-            cursor.execute('SELECT id, ip, hostname, notes FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-            ip_addresses = cursor.fetchall()
-            cursor.execute('SELECT id, name, description FROM Device')
-            devices = cursor.fetchall()
-            device_name_map = {name.lower(): (id, description) for id, name, description in devices}
-            ip_addresses_with_device = []
-            for ip in ip_addresses:
-                ip_id = ip[0]
-                ip_address = ip[1]
-                hostname = ip[2]
-                ip_notes = ip[3] if len(ip) > 3 else None
-                device_id = None
-                device_description = None
-                if hostname:
-                    match = device_name_map.get(hostname.lower())
-                    if match:
-                        device_id, device_description = match
-                ip_addresses_with_device.append((ip_id, ip_address, hostname, device_id, device_description, ip_notes))
+            cursor.execute('''
+                SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
+                FROM IPAddress ip
+                LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+                LEFT JOIN Device d ON dia.device_id = d.id
+                WHERE ip.subnet_id = %s
+                ORDER BY INET_ATON(ip.ip)
+            ''', (subnet_id,))
+            ip_addresses_with_device = cursor.fetchall()
         output = StringIO()
         writer = csv.writer(output)
         writer.writerow(['IP Address', 'Hostname', 'Description'])
@@ -3761,7 +3732,7 @@ def register_routes(app, limiter=None):
                     FROM IPAddress ip
                     JOIN Subnet s ON ip.subnet_id = s.id
                     WHERE ip.ip LIKE %s OR ip.hostname LIKE %s OR ip.notes LIKE %s
-                    ORDER BY ip.ip
+                    ORDER BY INET_ATON(ip.ip)
                 ''', (search_pattern, search_pattern, search_pattern))
                 results['ips'] = [{'id': row[0], 'ip': row[1], 'hostname': row[2], 
                                   'subnet_id': row[3], 'subnet_name': row[4], 
@@ -4177,7 +4148,7 @@ def register_routes(app, limiter=None):
                 LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
                 LEFT JOIN Device d ON dia.device_id = d.id
                 WHERE ip.subnet_id = %s
-                ORDER BY ip.ip
+                ORDER BY INET_ATON(ip.ip)
             ''', (subnet_id,))
             subnet['ip_addresses'] = cursor.fetchall()
             # Get custom fields
@@ -5215,7 +5186,7 @@ def register_routes(app, limiter=None):
                         FROM DeviceIPAddress dia
                         JOIN IPAddress ip ON dia.ip_id = ip.id
                         WHERE dia.device_id = %s
-                        ORDER BY ip.ip
+                        ORDER BY INET_ATON(ip.ip)
                         LIMIT 1
                     ''', (device['id'],))
                     ip_result = cursor.fetchone()
@@ -5562,19 +5533,19 @@ def register_routes(app, limiter=None):
                 writer.writerow([f"Subnet: {subnet[1]} ({subnet[2]})"])
                 writer.writerow(['IP Address', 'Hostname', 'Description'])
                 
-                cursor.execute('SELECT * FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
+                cursor.execute('''
+                    SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
+                    FROM IPAddress ip
+                    LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+                    LEFT JOIN Device d ON dia.device_id = d.id
+                    WHERE ip.subnet_id = %s
+                    ORDER BY INET_ATON(ip.ip)
+                ''', (subnet_id,))
                 ip_addresses = cursor.fetchall()
-                cursor.execute('SELECT id, name, description FROM Device')
-                devices = cursor.fetchall()
-                device_name_map = {name.lower(): (id, description) for id, name, description in devices}
                 
                 for ip in ip_addresses:
                     hostname = ip[2]
-                    device_description = None
-                    if hostname:
-                        match = device_name_map.get(hostname.lower())
-                        if match:
-                            device_description = match[1]
+                    device_description = ip[4] if len(ip) > 4 else None
                     writer.writerow([ip[1] or '', hostname or '', device_description or ''])
                 
                 writer.writerow([])  # Empty row between subnets
