@@ -24,12 +24,18 @@
                     </div>
                     <ul class="subnet-list hidden space-y-4 px-2 pb-4">
                         {% for subnet in subnets %}
-                        <li class="p-4 bg-gray-300 hover:bg-gray-100 dark:bg-zinc-900 hover:dark:bg-zinc-700 rounded-lg shadow-md flex items-center justify-between">
-                            <a href="/subnet/{{ subnet.id }}">
+                        <li class="relative p-4 bg-gray-300 hover:bg-gray-100 dark:bg-zinc-900 hover:dark:bg-zinc-700 rounded-lg shadow-md flex items-center justify-between">
+                            <a href="/subnet/{{ subnet.id }}" class="absolute inset-0 z-0 rounded-lg"></a>
+                            <div class="pointer-events-none z-10 flex-grow">
                                 <p class="text-gray-900 dark:text-white text-lg font-medium">{{ subnet.name }}</p>
-                                <p class="text-sm text-gray-800 dark:text-gray-400">{{ subnet.cidr }}</p>
-                            </a>
-                            <button type="button" class="export-csv-btn ml-2 bg-gray-200 hover:bg-gray-400 dark:bg-zinc-600 dark:hover:bg-zinc-500 hover:cursor-pointer flex items-center justify-center rounded-full w-9 h-9" title="Export as CSV" data-subnet-id="{{ subnet.id }}">
+                                <div class="flex items-center space-x-2">
+                                    <p class="text-sm text-gray-800 dark:text-gray-400">{{ subnet.cidr }}</p>
+                                    {% if subnet.vlan_id %}
+                                    <span class="px-2 py-0.5 text-xs font-semibold bg-gray-200 dark:bg-zinc-800 rounded-full">VLAN {{ subnet.vlan_id }}</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <button type="button" class="relative z-10 export-csv-btn ml-2 bg-gray-200 hover:bg-gray-400 dark:bg-zinc-600 dark:hover:bg-zinc-500 hover:cursor-pointer flex items-center justify-center rounded-full w-9 h-9 shrink-0" title="Export as CSV" data-subnet-id="{{ subnet.id }}">
                                 <i class="fas fa-file-csv"></i>
                             </button>
                         </li>

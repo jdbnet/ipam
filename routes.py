@@ -539,7 +539,7 @@ def prewarm_cache(app):
                     
                     # Pre-warm index page (all subnets with utilization)
                     logging.info("Pre-warming cache: Loading all subnets for index page...")
-                    cursor.execute('SELECT id, name, cidr, site FROM Subnet')
+                    cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet')
                     subnets = cursor.fetchall()
                     sites_subnets = {}
                     for subnet in subnets:
@@ -570,6 +570,7 @@ def prewarm_cache(app):
                             'id': subnet[0],
                             'name': subnet[1],
                             'cidr': subnet[2],
+                            'vlan_id': subnet[4],
                             'utilization': round(utilization_percent, 1)
                         })
                     cache.set('index', sites_subnets, ttl=10800)
@@ -990,7 +991,7 @@ def register_routes(app, limiter=None):
         conn = get_db_connection(current_app)
         try:
             cursor = conn.cursor()
-            cursor.execute('SELECT id, name, cidr, site FROM Subnet')
+            cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet')
             subnets = cursor.fetchall()
             sites_subnets = {}
             for subnet in subnets:
@@ -1024,6 +1025,7 @@ def register_routes(app, limiter=None):
                     'id': subnet[0],
                     'name': subnet[1],
                     'cidr': subnet[2],
+                    'vlan_id': subnet[4],
                     'utilization': round(utilization_percent, 1)
                 })
             # Cache for 3 hours
