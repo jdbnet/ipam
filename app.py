@@ -259,6 +259,30 @@ def items_response(items):
     return jsonify({'items': items})
 
 
+def build_audit_filters():
+    """Build WHERE clause and params for audit log queries from request args."""
+    clauses = []
+    params = []
+    user = request.args.get('user', '').strip()
+    if user:
+        clauses.append('u.name LIKE %s')
+        params.append(f'%{user}%')
+    action = request.args.get('action', '').strip()
+    if action:
+        clauses.append('al.action = %s')
+        params.append(action)
+    from_date = request.args.get('from', '').strip()
+    if from_date:
+        clauses.append('al.timestamp >= %s')
+        params.append(f'{from_date} 00:00:00')
+    to_date = request.args.get('to', '').strip()
+    if to_date:
+        clauses.append('al.timestamp <= %s')
+        params.append(f'{to_date} 23:59:59')
+    where_sql = ('WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    return where_sql, params
+
+
 def get_current_user_id():
     user = current_user()
     return user['id'] if user else session.get('user_id')
@@ -1073,7 +1097,7 @@ def enrich_devices_batch(cursor, devices):
     placeholders = ','.join(['%s'] * len(device_ids))
 
     cursor.execute(f'''
-        SELECT dia.device_id, ip.id, ip.ip, ip.hostname, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
+        SELECT dia.device_id, ip.id, ip.ip, ip.hostname, ip.notes, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
         FROM DeviceIPAddress dia
         JOIN IPAddress ip ON dia.ip_id = ip.id
         JOIN Subnet s ON ip.subnet_id = s.id
@@ -1484,7 +1508,7 @@ def api_device(device_id):
         if not device:
             return jsonify({'error': 'Device not found'}), 404
         cursor.execute('''
-            SELECT ip.id, ip.ip, ip.hostname, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
+            SELECT ip.id, ip.ip, ip.hostname, ip.notes, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
             FROM DeviceIPAddress dia
             JOIN IPAddress ip ON dia.ip_id = ip.id
             JOIN Subnet s ON ip.subnet_id = s.id
@@ -1704,20 +1728,20 @@ def api_subnet_next_free_ip(subnet_id):
         if not cursor.fetchone():
             return jsonify({'error': 'Subnet not found'}), 404
         
-        # Find the first IP in the subnet that is not assigned to any device
+        # Find the first unassigned IP outside DHCP pools
         cursor.execute('''
             SELECT ip.id, ip.ip
             FROM IPAddress ip
             LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
             WHERE ip.subnet_id = %s AND dia.ip_id IS NULL
             ORDER BY INET_ATON(ip.ip)
-            LIMIT 1
         ''', (subnet_id,))
-        result = cursor.fetchone()
-        if not result:
+        ips = [{'id': r['id'], 'ip': r['ip']} for r in cursor.fetchall()]
+        ips = filter_ips_outside_dhcp(cursor, subnet_id, ips)
+        if not ips:
             return jsonify({'error': 'No free IP addresses available in this subnet'}), 404
-        
-        return jsonify({'id': result['id'], 'ip': result['ip']})
+
+        return jsonify({'id': ips[0]['id'], 'ip': ips[0]['ip']})
 
 @app.route('/api/v2/subnets', methods=['POST'])
 @require_permission('add_subnet')
@@ -1901,7 +1925,7 @@ def api_racks():
                 ORDER BY rd.position_u, rd.side
             ''', (rack['id'],))
             rack['devices'] = cursor.fetchall()
-    return jsonify({'racks': racks})
+    return items_response(racks)
 
 @app.route('/api/v2/racks/<int:rack_id>', methods=['GET'])
 @require_permission('view_rack')
@@ -2140,7 +2164,7 @@ def api_custom_fields_by_type(entity_type):
                     field['validation_rules'] = json.loads(field['validation_rules'])
                 except (json.JSONDecodeError, TypeError):
                     field['validation_rules'] = {}
-    return jsonify({'fields': fields})
+    return items_response(fields)
 
 @app.route('/api/v2/custom_fields', methods=['POST'])
 @require_permission('manage_custom_fields')
@@ -2327,7 +2351,7 @@ def api_tags():
         for tag in tags:
             cursor.execute('SELECT COUNT(*) as device_count FROM DeviceTag WHERE tag_id = %s', (tag['id'],))
             tag['device_count'] = cursor.fetchone()['device_count']
-    return jsonify({'tags': tags})
+    return items_response(tags)
 
 @app.route('/api/v2/tags', methods=['POST'])
 @require_permission('add_tag')
@@ -2457,7 +2481,7 @@ def api_device_tags(device_id):
             ORDER BY t.name
         ''', (device_id,))
         tags = cursor.fetchall()
-    return jsonify({'tags': tags})
+    return items_response(tags)
 
 @app.route('/api/v2/devices/<int:device_id>/tags', methods=['POST'])
 @require_permission('assign_device_tag')
@@ -2559,7 +2583,7 @@ def api_devices_by_tag(tag_identifier):
         devices = cursor.fetchall()
         
         if not devices:
-            return jsonify({'devices': [], 'tag_name': tag_name, 'count': 0})
+            return jsonify({'items': [], 'meta': {'tag_name': tag_name, 'count': 0}})
         
         if simple_format:
             # Simple format: just name and first IP as clean array
@@ -2588,7 +2612,7 @@ def api_devices_by_tag(tag_identifier):
             # Full format: complete device information
             for device in devices:
                 cursor.execute('''
-                    SELECT ip.id, ip.ip, ip.hostname, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
+                    SELECT ip.id, ip.ip, ip.hostname, ip.notes, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
                     FROM DeviceIPAddress dia
                     JOIN IPAddress ip ON dia.ip_id = ip.id
                     JOIN Subnet s ON ip.subnet_id = s.id
@@ -2605,27 +2629,46 @@ def api_devices_by_tag(tag_identifier):
                 ''', (device['id'],))
                 device['tags'] = cursor.fetchall()
                 
-            return jsonify({'devices': devices, 'tag_name': tag_name, 'count': len(devices)})
+            return jsonify({'items': devices, 'meta': {'tag_name': tag_name, 'count': len(devices)}})
 
 # Audit Log API
+@app.route('/api/v2/audit/actions', methods=['GET'])
+@require_permission('view_audit')
+def api_audit_actions():
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT DISTINCT action FROM AuditLog ORDER BY action')
+        actions = [row[0] for row in cursor.fetchall()]
+    return items_response(actions)
+
+
 @app.route('/api/v2/audit', methods=['GET'])
 @require_permission('view_audit')
 def api_audit():
     """Get audit log entries"""
     from flask import current_app
+    where_sql, filter_params = build_audit_filters()
+    limit = request.args.get('limit', 100, type=int)
+    offset = request.args.get('offset', 0, type=int)
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
-        limit = request.args.get('limit', 100, type=int)
-        offset = request.args.get('offset', 0, type=int)
-        cursor.execute('''
+        cursor.execute(f'''
+            SELECT COUNT(*) as total
+            FROM AuditLog al
+            LEFT JOIN User u ON al.user_id = u.id
+            {where_sql}
+        ''', tuple(filter_params))
+        total = cursor.fetchone()['total']
+        cursor.execute(f'''
             SELECT al.id, al.user_id, u.name as user_name, al.action, al.details, al.subnet_id, al.timestamp
             FROM AuditLog al
             LEFT JOIN User u ON al.user_id = u.id
+            {where_sql}
             ORDER BY al.timestamp DESC
             LIMIT %s OFFSET %s
-        ''', (limit, offset))
+        ''', tuple(filter_params) + (limit, offset))
         logs = cursor.fetchall()
-    return jsonify({'logs': logs})
+    return jsonify({'items': logs, 'total': total})
 
 # Users API (admin only)
 @app.route('/api/v2/users', methods=['GET'])
@@ -2645,7 +2688,7 @@ def api_users():
         # Don't return API keys in list
         for user in users:
             user.pop('api_key', None)
-    return jsonify({'users': users})
+    return items_response(users)
 
 # Roles API (admin only)
 @app.route('/api/v2/roles', methods=['GET'])
@@ -2665,7 +2708,7 @@ def api_roles():
                 WHERE rp.role_id = %s
             ''', (role['id'],))
             role['permissions'] = cursor.fetchall()
-    return jsonify({'roles': roles})
+    return items_response(roles)
 
 
 # ── Extended v2 endpoints ─────────────────────────────────────────────────────
@@ -2832,15 +2875,17 @@ def api_reorder_custom_fields():
 @app.route('/api/v2/audit/export', methods=['GET'])
 @require_permission('view_audit')
 def api_audit_export():
+    where_sql, filter_params = build_audit_filters()
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
-        cursor.execute('''
+        cursor.execute(f'''
             SELECT al.timestamp, u.name, al.action, al.details, s.name
             FROM AuditLog al
             LEFT JOIN User u ON al.user_id = u.id
             LEFT JOIN Subnet s ON al.subnet_id = s.id
+            {where_sql}
             ORDER BY al.timestamp DESC
-        ''')
+        ''', tuple(filter_params))
         rows = cursor.fetchall()
     return csv_attachment(rows, ['Timestamp', 'User', 'Action', 'Details', 'Subnet'], 'audit_log.csv')
 

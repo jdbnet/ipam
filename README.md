@@ -10,7 +10,7 @@ A Flask-based web application for comprehensive IP Address Management (IPAM). Ma
 
 - **Subnet Management**: Create and manage IP subnets with CIDR notation (supports /24 to /32)
 - **IP Address Tracking**: Automatic IP address generation and tracking for each subnet
-- **Device Management**: Track devices with types (Server, VM, Switch, Firewall, WiFi AP, Printer, Other)
+- **Device Management**: Track devices with names, descriptions, tags, and custom fields
 - **Device Tagging**: Organize devices with customizable tags featuring colors and descriptions
 - **IP Assignment**: Assign IP addresses to devices with automatic hostname updates
 - **DHCP Pool Configuration**: Configure DHCP pools with start/end IP ranges and excluded IPs
@@ -113,8 +113,8 @@ See [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md) for removed fea
 
 ### Managing Subnets
 
-1. Navigate to "Admin" from the main menu
-2. Click "Add Subnet" and fill in:
+1. Navigate to **Subnet Management** from the main menu (`/subnets/manage`)
+2. Click **Add Subnet** and fill in:
    - **Name**: Friendly name for the subnet (e.g., "Office LAN")
    - **CIDR**: Subnet in CIDR notation (e.g., `192.168.1.0/24`)
    - **Site**: Site/location identifier
@@ -135,8 +135,8 @@ See [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md) for removed fea
 
 ### Configuring DHCP Pools
 
-1. Open a subnet view
-2. Click "Configure DHCP Pool"
+1. Open a subnet from the dashboard or subnet list
+2. Click **DHCP** to open the DHCP pool modal
 3. Set the start and end IP addresses
 4. Optionally specify excluded IPs (comma-separated)
 5. IPs within the pool range are automatically marked as "DHCP"
@@ -152,10 +152,10 @@ See [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md) for removed fea
 
 ### Device Tagging
 
-1. **Managing Tags** (Admin only):
-   - Navigate to "Admin" > "Tag Management"
-   - Click "Add Tag" to create new tags with custom colors and descriptions
-   - Edit or delete existing tags as needed
+1. **Managing Tags** (requires `add_tag` / `edit_tag` / `delete_tag` permissions):
+   - Navigate to **Tags** from the main menu
+   - Create tags with custom colours and descriptions
+   - Edit or delete existing tags as permitted by your role
 
 2. **Assigning Tags to Devices**:
    - Open any device from the Devices page
@@ -168,7 +168,7 @@ See [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md) for removed fea
 
 ### Audit Log
 
-View all changes and actions in the "Audit Log" section, with filtering by user, subnet, action type, or device name.
+View changes in **Audit Log**. Filter by user name, action type, and date range. Export filtered results to CSV.
 
 ### Exporting Data
 
@@ -202,50 +202,29 @@ The system uses a granular role-based access control (RBAC) system to manage use
 
 ### REST API
 
-The application includes a comprehensive REST API for programmatic access:
+Programmatic access uses **`/api/v2`**. The browser SPA uses session cookies; automation uses API keys via:
 
-1. **Authentication**: All API requests require an API key, which can be provided via:
-   - `X-API-Key` header
-   - `Authorization: Bearer <api_key>` header
-   - `?api_key=<api_key>` query parameter
+- `X-API-Key` header
+- `Authorization: Bearer <api_key>` header
+- `?api_key=<api_key>` query parameter
 
-2. **Base URL**: All API endpoints are prefixed with `/api/v1`
+Each user has an API key (view/regenerate on the Users page). Keys respect the same RBAC permissions as the web UI.
 
-3. **Available Endpoints**:
-   - **Devices**: `GET`, `POST`, `PUT`, `DELETE /api/v1/devices`
-   - **Device Tags**: `GET /api/v1/devices/by-tag/{tag}` (filter devices by tag)
-   - **Tags**: `GET`, `POST`, `PUT`, `DELETE /api/v1/tags` (with `?format=simple` option)
-   - **Tag Assignment**: `GET`, `POST /api/v1/devices/{id}/tags`, `DELETE /api/v1/devices/{id}/tags/{tag_id}`
-   - **Subnets**: `GET`, `POST`, `PUT`, `DELETE /api/v1/subnets`
-   - **Racks**: `GET`, `POST`, `DELETE /api/v1/racks`
-   - **DHCP**: `GET`, `POST /api/v1/subnets/{id}/dhcp`
-   - **Audit Log**: `GET /api/v1/audit`
-   - **Users & Roles**: `GET /api/v1/users`, `GET /api/v1/roles` (admin only)
+Full endpoint reference: [API.md](API.md)
 
-4. **API Keys**: Each user has a unique API key that can be viewed and regenerated from the Users page. API keys respect the same role-based permissions as the web interface.
-
-5. **Documentation**: See [API.md](API.md) for the full REST API reference.
-
-**Example API Requests**:
 ```bash
-# List all devices
-curl -H "X-API-Key: your_api_key" \
-     https://your-server:5000/api/v1/devices
+# List devices
+curl -H "X-API-Key: YOUR_KEY" https://your-server:5000/api/v2/devices
 
-# Get devices with a specific tag
-curl -H "X-API-Key: your_api_key" \
-     https://your-server:5000/api/v1/devices/by-tag/production
-
-# List all tags in simple format
-curl -H "X-API-Key: your_api_key" \
-     https://your-server:5000/api/v1/tags?format=simple
+# Session login (browser-style)
+curl -c cookies.txt -X POST -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"password"}' \
+  https://your-server:5000/api/v2/auth/login
 ```
 
 ## Kubernetes Deployment
 
-The project includes a Kubernetes deployment manifest. See `deployment.yml` for details.
-
-**Example Kubernetes deployment:**
+Example deployment manifest:
 
 ```yaml
 apiVersion: apps/v1
@@ -313,7 +292,7 @@ spec:
 ### Subnet or IP Not Appearing
 
 - Verify CIDR notation is correct (supports /24 to /32)
-- Check subnet was created successfully (view in Admin page)
+- Check subnet was created successfully (Subnet Management page)
 - Ensure you're logged in with appropriate permissions
 - Check application logs for errors
 

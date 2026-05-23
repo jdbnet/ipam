@@ -53,7 +53,8 @@ v2 removes **all Jinja/HTML routes**. The UI is a Vue 3 SPA served from `static/
 | `/api/v1/*` | **`/api/v2/*`** (v1 removed) |
 | Session via HTML login forms | `POST /api/v2/auth/login` + session cookie |
 | API key only on API routes | **Same routes** accept session cookie **or** API key |
-| `{ "devices": [...] }` list responses | **`{ "items": [...] }`** for list endpoints (where normalized) |
+| `{ "devices": [...] }` list responses | **`{ "items": [...] }`** for all list endpoints |
+| `{ "tags" }`, `{ "users" }`, `{ "roles" }`, `{ "racks" }`, `{ "logs" }`, `{ "fields" }` wrappers | **`{ "items" }`** (audit also includes `total`; devices-by-tag includes `meta`) |
 
 ### Version
 

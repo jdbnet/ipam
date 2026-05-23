@@ -1,7 +1,16 @@
 const jsonHeaders = { "Content-Type": "application/json" };
 
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: () => void) {
+  onUnauthorized = fn;
+}
+
 async function handle<T>(res: Response): Promise<T> {
-  if (res.status === 401) throw new Error("unauthorized");
+  if (res.status === 401) {
+    onUnauthorized?.();
+    throw new Error("unauthorized");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as { error?: string }).error || res.statusText);
   return data as T;
@@ -36,6 +45,7 @@ export interface IpOnDevice {
   subnet_name?: string;
   cidr?: string;
   site?: string;
+  notes?: string;
 }
 
 export interface Subnet {
@@ -121,6 +131,18 @@ export interface CustomFieldDef {
   field_type: string;
   required?: boolean;
   display_order?: number;
+  default_value?: string;
+  help_text?: string;
+  validation_rules?: { select_options?: string[] };
+}
+
+export interface AuditParams {
+  limit?: number;
+  offset?: number;
+  user?: string;
+  action?: string;
+  from?: string;
+  to?: string;
 }
 
 export const api = {
@@ -228,8 +250,8 @@ export const api = {
     return `/api/v2/subnets/${id}/export`;
   },
   async tags() {
-    const d = await handle<{ tags?: Tag[]; items?: Tag[] }>(await fetchApi("/api/v2/tags"));
-    return d.items ?? d.tags ?? [];
+    const d = await handle<{ items: Tag[] }>(await fetchApi("/api/v2/tags"));
+    return d.items;
   },
   async createTag(body: Partial<Tag>) {
     return handle(await fetchApi("/api/v2/tags", { method: "POST", headers: jsonHeaders, body: JSON.stringify(body) }));
@@ -249,8 +271,8 @@ export const api = {
     return handle(await fetchApi(`/api/v2/devices/${deviceId}/tags/${tagId}`, { method: "DELETE" }));
   },
   async racks() {
-    const d = await handle<{ racks?: Rack[]; items?: Rack[] }>(await fetchApi("/api/v2/racks"));
-    return d.racks ?? d.items ?? [];
+    const d = await handle<{ items: Rack[] }>(await fetchApi("/api/v2/racks"));
+    return d.items;
   },
   async rack(id: number) {
     return handle<Rack>(await fetchApi(`/api/v2/racks/${id}`));
@@ -318,18 +340,37 @@ export const api = {
       method: "POST", headers: jsonHeaders, body: JSON.stringify({ password }),
     }));
   },
-  async audit(limit = 100) {
-    const d = await handle<{ logs: AuditEntry[] }>(await fetchApi(`/api/v2/audit?limit=${limit}`));
-    return d.logs;
+  async audit(params: AuditParams = {}) {
+    const p = new URLSearchParams();
+    if (params.limit != null) p.set("limit", String(params.limit));
+    if (params.offset != null) p.set("offset", String(params.offset));
+    if (params.user) p.set("user", params.user);
+    if (params.action) p.set("action", params.action);
+    if (params.from) p.set("from", params.from);
+    if (params.to) p.set("to", params.to);
+    const q = p.toString();
+    return handle<{ items: AuditEntry[]; total: number }>(await fetchApi(`/api/v2/audit${q ? `?${q}` : ""}`));
   },
-  auditExportUrl: "/api/v2/audit/export",
+  async auditActions() {
+    const d = await handle<{ items: string[] }>(await fetchApi("/api/v2/audit/actions"));
+    return d.items;
+  },
+  auditExportUrl(params: AuditParams = {}) {
+    const p = new URLSearchParams();
+    if (params.user) p.set("user", params.user);
+    if (params.action) p.set("action", params.action);
+    if (params.from) p.set("from", params.from);
+    if (params.to) p.set("to", params.to);
+    const q = p.toString();
+    return `/api/v2/audit/export${q ? `?${q}` : ""}`;
+  },
   async users() {
-    const d = await handle<{ users?: UserRow[]; items?: UserRow[] }>(await fetchApi("/api/v2/users"));
-    return d.users ?? d.items ?? [];
+    const d = await handle<{ items: UserRow[] }>(await fetchApi("/api/v2/users"));
+    return d.items;
   },
   async roles() {
-    const d = await handle<{ roles?: RoleRow[] }>(await fetchApi("/api/v2/roles"));
-    return d.roles ?? [];
+    const d = await handle<{ items: RoleRow[] }>(await fetchApi("/api/v2/roles"));
+    return d.items;
   },
   async permissions() {
     const d = await handle<{ items: { id: number; name: string; category?: string }[] }>(
@@ -338,8 +379,18 @@ export const api = {
     return d.items;
   },
   async customFields(entityType: string) {
-    const d = await handle<{ fields?: CustomFieldDef[] }>(await fetchApi(`/api/v2/custom_fields/${entityType}`));
-    return d.fields ?? [];
+    const d = await handle<{ items: CustomFieldDef[] }>(await fetchApi(`/api/v2/custom_fields/${entityType}`));
+    return d.items;
+  },
+  async patchDeviceCustomFields(deviceId: number, customFields: Record<string, unknown>) {
+    return handle(await fetchApi(`/api/v2/devices/${deviceId}/custom-fields`, {
+      method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ custom_fields: customFields }),
+    }));
+  },
+  async patchSubnetCustomFields(subnetId: number, customFields: Record<string, unknown>) {
+    return handle(await fetchApi(`/api/v2/subnets/${subnetId}/custom-fields`, {
+      method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ custom_fields: customFields }),
+    }));
   },
   async bulkAssignIps(deviceId: number, ipIds: number[]) {
     return handle(await fetchApi("/api/v2/bulk/assign-ips", {

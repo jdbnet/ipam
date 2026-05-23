@@ -10,10 +10,20 @@ const showAdd = ref(false);
 const showEdit = ref(false);
 const form = ref({ name: "", site: "", height_u: 42 });
 const editId = ref(0);
+const loading = ref(true);
 const err = ref("");
 
 async function load() {
-  racks.value = await api.racks();
+  loading.value = true;
+  err.value = "";
+  try {
+    racks.value = await api.racks();
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : "Failed to load racks";
+    racks.value = [];
+  } finally {
+    loading.value = false;
+  }
 }
 
 onMounted(load);
@@ -60,7 +70,10 @@ async function del(id: number) {
       <h1 class="text-2xl font-bold">Racks</h1>
       <button v-if="auth.can('add_rack')" class="btn-primary text-sm" @click="showAdd = true; err = ''">Add rack</button>
     </div>
-    <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+    <p v-if="loading" class="mt-6 text-slate-500">Loading…</p>
+    <p v-else-if="err && !racks.length" class="mt-6 text-red-500">{{ err }}</p>
+    <p v-else-if="!racks.length" class="mt-6 text-slate-500">No racks yet.</p>
+    <div v-else class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       <div v-for="r in racks" :key="r.id" class="card">
         <RouterLink :to="`/racks/${r.id}`" class="block transition hover:text-accent">
           <div class="font-medium">{{ r.name }}</div>

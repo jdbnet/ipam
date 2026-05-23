@@ -21,25 +21,49 @@ All endpoints are JSON under `/api/v2`. The Vue SPA uses **session cookies** (`c
 | POST | `/api/v2/account/disable-2fa` |
 | POST | `/api/v2/account/regenerate-backup-codes` |
 
-## Core resources
+## List response format
 
-List endpoints return `{ "items": [...] }` unless noted.
+List endpoints return `{ "items": [...] }`. Exceptions:
+
+- **Audit log** — `{ "items": [...], "total": N }` (supports pagination)
+- **Devices by tag** — `{ "items": [...], "meta": { "tag_name", "count" } }`
+- **Single resources** (device, subnet, rack) — flat object, not wrapped in `items`
+
+## Core resources
 
 | Resource | Endpoints |
 |----------|-----------|
 | Dashboard | `GET /api/v2/dashboard` |
 | Search | `GET /api/v2/search?q=` |
 | Devices | CRUD + `/ips`, `/tags`, `/ip-history`, `/custom-fields` |
-| Subnets | CRUD + `/available-ips`, `/export`, `/dhcp`, `/custom-fields` |
+| Subnets | CRUD + `/available-ips`, `/next_free_ip`, `/export`, `/dhcp`, `/custom-fields` |
 | IP addresses | `PATCH /api/v2/ip-addresses/{id}` (notes) |
 | IP history | `GET /api/v2/ips/{ip}/history` |
 | Tags | CRUD + device tag assign/remove |
 | Racks | CRUD + `/devices`, `/export` |
 | Custom fields | CRUD + `POST /custom-fields/reorder` |
-| Audit | `GET /audit`, `GET /audit/export` |
+| Audit | `GET /audit`, `GET /audit/actions`, `GET /audit/export` |
 | Users & roles | CRUD + `POST /users/{id}/regenerate-api-key` |
 | Permissions | `GET /permissions` |
 | Bulk | `POST /bulk/assign-ips`, `/create-devices`, `/assign-tags`, `/export-subnets` |
+
+### Subnet IP helpers
+
+- `GET /api/v2/subnets/{id}/available-ips` — unassigned IPs outside DHCP pools
+- `GET /api/v2/subnets/{id}/next_free_ip` — first available IP (also excludes DHCP pools)
+
+### Audit query parameters
+
+| Param | Description |
+|-------|-------------|
+| `limit` | Page size (default 100) |
+| `offset` | Offset for pagination (default 0) |
+| `user` | Filter by user name (partial match) |
+| `action` | Exact action match (see `GET /audit/actions` for values) |
+| `from` | Start date (`YYYY-MM-DD`) |
+| `to` | End date (`YYYY-MM-DD`) |
+
+Export (`GET /audit/export`) accepts the same filter params.
 
 See route handlers in `app.py` for required permissions and request bodies.
 
