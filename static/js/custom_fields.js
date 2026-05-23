@@ -99,7 +99,6 @@ function showAddFieldModal(entityType) {
     document.getElementById('field-default-value').value = '';
     document.getElementById('field-help-text').value = '';
     document.getElementById('field-display-order').value = '0';
-    document.getElementById('field-searchable').checked = false;
     
     // Reset validation fields
     document.getElementById('field-min-length').value = '';
@@ -181,7 +180,6 @@ function populateEditForm(field, entityType) {
     document.getElementById('field-default-value').value = field.default_value || '';
     document.getElementById('field-help-text').value = field.help_text || '';
     document.getElementById('field-display-order').value = field.display_order || 0;
-    document.getElementById('field-searchable').checked = field.searchable || false;
     
     // Parse validation rules
     let validationRules = {};

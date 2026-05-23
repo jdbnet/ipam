@@ -52,7 +52,6 @@
                                     <th class="text-left p-3">Field Key</th>
                                     <th class="text-left p-3">Type</th>
                                     <th class="text-center p-3">Required</th>
-                                    <th class="text-center p-3">Searchable</th>
                                     <th class="text-center p-3">Actions</th>
                                 </tr>
                             </thead>
@@ -75,13 +74,6 @@
                                     <td class="p-3 text-sm">{{ field.field_type }}</td>
                                     <td class="p-3 text-center">
                                         {% if field.required %}
-                                        <i class="fas fa-check text-green-500"></i>
-                                        {% else %}
-                                        <i class="fas fa-times text-gray-400"></i>
-                                        {% endif %}
-                                    </td>
-                                    <td class="p-3 text-center">
-                                        {% if field.searchable %}
                                         <i class="fas fa-check text-green-500"></i>
                                         {% else %}
                                         <i class="fas fa-times text-gray-400"></i>
@@ -132,7 +124,6 @@
                                     <th class="text-left p-3">Field Key</th>
                                     <th class="text-left p-3">Type</th>
                                     <th class="text-center p-3">Required</th>
-                                    <th class="text-center p-3">Searchable</th>
                                     <th class="text-center p-3">Actions</th>
                                 </tr>
                             </thead>
@@ -155,13 +146,6 @@
                                     <td class="p-3 text-sm">{{ field.field_type }}</td>
                                     <td class="p-3 text-center">
                                         {% if field.required %}
-                                        <i class="fas fa-check text-green-500"></i>
-                                        {% else %}
-                                        <i class="fas fa-times text-gray-400"></i>
-                                        {% endif %}
-                                    </td>
-                                    <td class="p-3 text-center">
-                                        {% if field.searchable %}
                                         <i class="fas fa-check text-green-500"></i>
                                         {% else %}
                                         <i class="fas fa-times text-gray-400"></i>
@@ -261,10 +245,6 @@
                         <label class="block text-sm font-medium mb-1">Display Order</label>
                         <input type="number" name="display_order" id="field-display-order" value="0" min="0"
                                class="border p-3 rounded-lg bg-gray-300 text-gray-900 dark:bg-zinc-900 dark:text-gray-100 border-gray-600 w-full">
-                    </div>
-                    <div class="flex items-center space-x-2">
-                        <input type="checkbox" name="searchable" id="field-searchable" class="w-4 h-4">
-                        <label for="field-searchable" class="text-sm font-medium">Searchable</label>
                     </div>
                     
                     <!-- Validation Rules Section -->

@@ -146,8 +146,6 @@ Subnets must be `/24` or smaller (prefix length ≥ 24).
 
 ## Racks
 
-Requires the racks feature to be enabled.
-
 | Method | Endpoint | Permission | Description |
 |--------|----------|------------|-------------|
 | GET | `/api/v1/racks` | `view_racks` | List all racks |
@@ -160,8 +158,6 @@ Requires the racks feature to be enabled.
 ---
 
 ## Tags
-
-Requires the device tags feature to be enabled.
 
 | Method | Endpoint | Permission | Description |
 |--------|----------|------------|-------------|
@@ -206,7 +202,6 @@ Requires the device tags feature to be enabled.
   "default_value": "",
   "help_text": "Optional help text",
   "display_order": 0,
-  "searchable": true,
   "validation_rules": {
     "max_length": 32
   }

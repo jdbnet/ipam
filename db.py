@@ -313,7 +313,6 @@ def init_db(app=None):
         help_text TEXT,
         display_order INTEGER DEFAULT 0,
         validation_rules TEXT,
-        searchable BOOLEAN DEFAULT FALSE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )
@@ -350,32 +349,6 @@ def init_db(app=None):
     cursor.execute("SHOW COLUMNS FROM Subnet LIKE 'vlan_notes'")
     if not cursor.fetchone():
         cursor.execute('ALTER TABLE Subnet ADD COLUMN vlan_notes TEXT DEFAULT NULL')
-    
-    # Create FeatureFlags table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS FeatureFlags (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        feature_key VARCHAR(255) NOT NULL UNIQUE,
-        enabled BOOLEAN DEFAULT TRUE,
-        description TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Initialize default feature flags
-    default_features = [
-        ('racks', True, 'Enable rack management functionality'),
-        ('ip_address_notes', True, 'Enable IP address notes/descriptions editing on subnet page'),
-        ('device_tags', True, 'Enable device tagging functionality'),
-        ('bulk_operations', True, 'Enable bulk operations for devices and IPs')
-    ]
-    
-    for feature_key, enabled, description in default_features:
-        cursor.execute('SELECT id FROM FeatureFlags WHERE feature_key = %s', (feature_key,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO FeatureFlags (feature_key, enabled, description) VALUES (%s, %s, %s)',
-                          (feature_key, enabled, description))
     
     # Define all permissions with categories
     permissions = [

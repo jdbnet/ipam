@@ -16,7 +16,6 @@ from ipaddress import ip_network, ip_address, IPv4Address, IPv6Address
 
 import pyotp
 import qrcode
-import requests
 import mysql.connector
 from dotenv import load_dotenv
 from flask import (
@@ -158,23 +157,6 @@ def permission_required(permission_name):
         return decorated_function
     return decorator
 
-def is_feature_enabled(feature_key, conn=None):
-    """Check if a feature flag is enabled"""
-    close_conn = False
-    if conn is None:
-        from flask import current_app
-        conn = get_db_connection(current_app)
-        close_conn = True
-    
-    try:
-        cursor = conn.cursor()
-        cursor.execute('SELECT enabled FROM FeatureFlags WHERE feature_key = %s', (feature_key,))
-        result = cursor.fetchone()
-        # Default to True if feature flag doesn't exist (backward compatibility)
-        return result[0] if result else True
-    finally:
-        if close_conn:
-            conn.close()
 
 def get_user_from_api_key(api_key):
     """Get user from API key"""
@@ -546,7 +528,7 @@ def get_custom_fields_for_entity(entity_type, entity_id, conn=None):
         # Get field definitions for this entity type
         cursor.execute('''
             SELECT id, entity_type, name, field_key, field_type, required, 
-                   default_value, help_text, display_order, validation_rules, searchable
+                   default_value, help_text, display_order, validation_rules
             FROM CustomFieldDefinition
             WHERE entity_type = %s
             ORDER BY display_order, name
@@ -1313,13 +1295,12 @@ def devices():
     tag_filter = request.args.get('tag')
     
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        tags_enabled = is_feature_enabled('device_tags', conn=conn)
+        tag_filter = request.args.get('tag')
         
         cursor = conn.cursor()
         
         # Base device query
-        if tag_filter and tags_enabled:
+        if tag_filter:
             cursor.execute('''
                 SELECT DISTINCT d.id, d.name, dt.icon_class 
                 FROM Device d 
@@ -1341,23 +1322,21 @@ def devices():
         for row in cursor.fetchall():
             device_ips.setdefault(row[0], []).append((row[1], row[2]))
         
-        # Get tags for each device (only if tags feature is enabled)
+        # Get tags for each device
         device_tags = {}
         all_tag_names = []
-        if tags_enabled:
-            for device in devices:
-                cursor.execute('''
-                    SELECT t.id, t.name, t.color
-                    FROM DeviceTag dt
-                    JOIN Tag t ON dt.tag_id = t.id
-                    WHERE dt.device_id = %s
-                    ORDER BY t.name
-                ''', (device[0],))
-                device_tags[device[0]] = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
-            
-            # Get all available tags for filtering
-            cursor.execute('SELECT DISTINCT name FROM Tag ORDER BY name')
-            all_tag_names = [row[0] for row in cursor.fetchall()]
+        for device in devices:
+            cursor.execute('''
+                SELECT t.id, t.name, t.color
+                FROM DeviceTag dt
+                JOIN Tag t ON dt.tag_id = t.id
+                WHERE dt.device_id = %s
+                ORDER BY t.name
+            ''', (device[0],))
+            device_tags[device[0]] = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
+        
+        cursor.execute('SELECT DISTINCT name FROM Tag ORDER BY name')
+        all_tag_names = [row[0] for row in cursor.fetchall()]
         
         # Optimize: Get device sites in a single query instead of N+1
         sites_devices = {}
@@ -1424,23 +1403,18 @@ def device(device_id):
         cursor.execute('''SELECT DeviceIPAddress.id as device_ip_id, IPAddress.ip FROM DeviceIPAddress JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id WHERE DeviceIPAddress.device_id = %s''', (device_id,))
         device_ips = [{'device_ip_id': row[0], 'ip': row[1]} for row in cursor.fetchall()]
         
-        # Get device tags (only if tags feature is enabled)
-        tags_enabled = is_feature_enabled('device_tags', conn=conn)
-        device_tags = []
-        all_tags = []
-        if tags_enabled:
-            cursor.execute('''
-                SELECT t.id, t.name, t.color
-                FROM DeviceTag dt
-                JOIN Tag t ON dt.tag_id = t.id
-                WHERE dt.device_id = %s
-                ORDER BY t.name
-            ''', (device_id,))
-            device_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
-            
-            # Get all available tags
-            cursor.execute('SELECT id, name, color FROM Tag ORDER BY name')
-            all_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
+        # Get device tags
+        cursor.execute('''
+            SELECT t.id, t.name, t.color
+            FROM DeviceTag dt
+            JOIN Tag t ON dt.tag_id = t.id
+            WHERE dt.device_id = %s
+            ORDER BY t.name
+        ''', (device_id,))
+        device_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
+        
+        cursor.execute('SELECT id, name, color FROM Tag ORDER BY name')
+        all_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
         available_ips_by_subnet = {}
         for subnet in subnets:
             cursor.execute('''
@@ -1548,8 +1522,6 @@ def device_delete_ip(device_id):
 def device_assign_tag(device_id):
     tag_id = request.form['tag_id']
     with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('device_tags', conn=conn):
-            abort(404)
         try:
             assign_tag_to_device(conn, device_id, tag_id, session['user_id'])
             conn.commit()
@@ -1562,8 +1534,6 @@ def device_assign_tag(device_id):
 def device_remove_tag(device_id):
     tag_id = request.form['tag_id']
     with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('device_tags', conn=conn):
-            abort(404)
         try:
             remove_tag_from_device(conn, device_id, tag_id, session['user_id'])
             conn.commit()
@@ -1614,15 +1584,11 @@ def subnet(subnet_id):
             'vlan_description': subnet[4] if len(subnet) > 4 else None,
             'vlan_notes': subnet[5] if len(subnet) > 5 else None
         }
-        # Check if IP address notes feature is enabled
-        ip_notes_enabled = is_feature_enabled('ip_address_notes', conn=conn)
-        
         return render_with_user('subnet.html', subnet=subnet_dict, 
                               ip_addresses=ip_addresses_with_device, 
                               utilization=utilization_stats,
                               custom_fields=custom_fields,
-                              can_edit_subnet=has_permission('edit_subnet'),
-                              ip_notes_enabled=ip_notes_enabled)
+                              can_edit_subnet=has_permission('edit_subnet'))
 
 @app.route('/add_subnet', methods=['POST'])
 @permission_required('add_subnet')
@@ -1749,50 +1715,15 @@ def admin():
                     'total': util['total']
                 }
             })
-        
-        # Get feature flags (inside the connection context)
-        cursor.execute('SELECT feature_key, enabled, description FROM FeatureFlags ORDER BY feature_key')
-        feature_flags = []
-        for row in cursor.fetchall():
-            feature_flags.append({
-                'key': row[0],
-                'enabled': bool(row[1]),
-                'description': row[2]
-            })
     
     result_data = {
         'subnets': subnets,
         'can_add_subnet': has_permission('add_subnet'),
         'can_edit_subnet': has_permission('edit_subnet'),
         'can_delete_subnet': has_permission('delete_subnet'),
-        'feature_flags': feature_flags
     }
     return render_with_user('admin.html', **result_data)
 
-@app.route('/admin/feature_flags', methods=['POST'])
-@permission_required('manage_users')
-def update_feature_flags():
-    """Update feature flags"""
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        # Get all feature flags
-        cursor.execute('SELECT feature_key FROM FeatureFlags')
-        all_features = [row[0] for row in cursor.fetchall()]
-        
-        # Update each feature flag based on form data
-        for feature_key in all_features:
-            enabled = request.form.get(f'feature_{feature_key}') == 'on'
-            cursor.execute('UPDATE FeatureFlags SET enabled = %s WHERE feature_key = %s', 
-                         (enabled, feature_key))
-            logging.info(f"User {user_name} {'enabled' if enabled else 'disabled'} feature '{feature_key}'")
-        
-        conn.commit()
-    
-    # Clear admin cache to refresh feature flags
-    
-    return redirect(url_for('admin'))
 
 @app.route('/account', methods=['GET'])
 @login_required
@@ -2066,9 +1997,6 @@ def users():
 def tags():
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            abort(404)
         cursor = conn.cursor()
         error = None
         
@@ -2158,15 +2086,8 @@ def custom_fields():
                     error = 'You do not have permission to add custom fields.'
                 else:
                     entity_type = request.form.get('entity_type', '').strip()
-                    # Debug logging
-                    logging.info(f"Received entity_type: '{entity_type}' (type: {type(entity_type)})")
-                    logging.info(f"Form data keys: {list(request.form.keys())}")
                     if not entity_type or entity_type not in ['device', 'subnet']:
-                        # Try to get from form data directly
-                        entity_type_raw = request.form.get('entity_type')
-                        logging.error(f"Invalid entity_type received: '{entity_type}' (raw: '{entity_type_raw}')")
-                        # Show more helpful error
-                        error = f'Invalid entity type: "{entity_type}". Must be "device" or "subnet". Please try again.'
+                        error = 'Invalid entity type. Must be "device" or "subnet".'
                     else:
                         name = request.form['name'].strip()
                         field_key = request.form.get('field_key', '').strip()
@@ -2175,7 +2096,6 @@ def custom_fields():
                         default_value = request.form.get('default_value', '').strip()
                         help_text = request.form.get('help_text', '').strip()
                         display_order = int(request.form.get('display_order', 0))
-                        searchable = 'searchable' in request.form
                         
                         # Generate field_key from name if not provided
                         if not field_key:
@@ -2193,10 +2113,10 @@ def custom_fields():
                                 cursor.execute('''
                                     INSERT INTO CustomFieldDefinition 
                                     (entity_type, name, field_key, field_type, required, default_value, 
-                                     help_text, display_order, validation_rules, searchable)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                     help_text, display_order, validation_rules)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ''', (entity_type, name, field_key, field_type, required, default_value,
-                                      help_text, display_order, validation_rules_json, searchable))
+                                      help_text, display_order, validation_rules_json))
                                 add_audit_log(session['user_id'], 'add_custom_field', 
                                             f"Added custom field '{name}' for {entity_type}", conn=conn)
                                 conn.commit()
@@ -2216,7 +2136,6 @@ def custom_fields():
                     default_value = request.form.get('default_value', '').strip()
                     help_text = request.form.get('help_text', '').strip()
                     display_order = int(request.form.get('display_order', 0))
-                    searchable = 'searchable' in request.form
                     
                     # Build validation_rules JSON
                     validation_rules_json = build_validation_rules_from_form(request.form, field_type)
@@ -2232,10 +2151,10 @@ def custom_fields():
                         cursor.execute('''
                             UPDATE CustomFieldDefinition 
                             SET name = %s, field_type = %s, required = %s, default_value = %s,
-                                help_text = %s, display_order = %s, validation_rules = %s, searchable = %s
+                                help_text = %s, display_order = %s, validation_rules = %s
                             WHERE id = %s
                         ''', (name, field_type, required, default_value, help_text, 
-                              display_order, validation_rules_json, searchable, field_id))
+                              display_order, validation_rules_json, field_id))
                         add_audit_log(session['user_id'], 'edit_custom_field', 
                                     f"Updated custom field '{name}'", conn=conn)
                         conn.commit()
@@ -2274,7 +2193,7 @@ def custom_fields():
         # Get all custom fields grouped by entity type
         cursor.execute('''
             SELECT id, entity_type, name, field_key, field_type, required, 
-                   default_value, help_text, display_order, validation_rules, searchable
+                   default_value, help_text, display_order, validation_rules
             FROM CustomFieldDefinition
             ORDER BY entity_type, display_order, name
         ''')
@@ -2305,26 +2224,6 @@ def custom_fields():
                            can_manage=has_permission('manage_custom_fields'),
                            active_tab=active_tab)
 
-@app.route('/custom_fields/<entity_type>')
-@permission_required('view_custom_fields')
-def custom_fields_by_type(entity_type):
-    """Get custom fields for a specific entity type"""
-    if entity_type not in ['device', 'subnet']:
-        abort(404)
-    
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute('''
-            SELECT id, entity_type, name, field_key, field_type, required, 
-                   default_value, help_text, display_order, validation_rules, searchable
-            FROM CustomFieldDefinition
-            WHERE entity_type = %s
-            ORDER BY display_order, name
-        ''', (entity_type,))
-        fields = cursor.fetchall()
-    
-    return jsonify({'fields': fields})
 
 @app.route('/audit')
 @permission_required('view_audit')
@@ -2370,60 +2269,6 @@ def export_audit_csv():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     return csv_attachment(logs, ['User', 'Action', 'Details', 'Subnet', 'Timestamp'], f'audit_logs_{timestamp}.csv')
 
-@app.route('/check_update')
-@login_required
-def check_update():
-    """Check for available updates from Gitea"""
-    try:
-        # Get current version from environment
-        current_version = os.environ.get('VERSION', 'unknown').lstrip('v')
-        
-        # Fetch latest release from Gitea
-        response = requests.get('https://git.jdbnet.co.uk/api/v1/repos/jamie/ipam/releases/latest', timeout=5)
-        if response.status_code != 200:
-            return jsonify({'error': 'Failed to fetch release information'}), 500
-        
-        release_data = response.json()
-        latest_version = release_data.get('tag_name', '').lstrip('v')
-        
-        # Compare versions using semantic versioning
-        result = {'update_available': False}
-        if latest_version and latest_version != current_version:
-            # Simple semantic version comparison
-            def version_tuple(v):
-                """Convert version string to tuple for comparison"""
-                parts = v.split('.')
-                return tuple(int(x) if x.isdigit() else 0 for x in parts[:3])
-            
-            try:
-                current_tuple = version_tuple(current_version)
-                latest_tuple = version_tuple(latest_version)
-                # Only show update if latest is actually newer
-                if latest_tuple > current_tuple:
-                    result = {
-                        'update_available': True,
-                        'current_version': current_version,
-                        'latest_version': latest_version,
-                        'release_url': release_data.get('html_url', '')
-                    }
-            except (ValueError, AttributeError):
-                # Fallback to string comparison if parsing fails
-                if latest_version != current_version:
-                    result = {
-                        'update_available': True,
-                        'current_version': current_version,
-                        'latest_version': latest_version,
-                        'release_url': release_data.get('html_url', '')
-                    }
-        
-        return jsonify(result)
-            
-    except requests.RequestException as e:
-        logging.error(f"Error checking for updates: {e}")
-        return jsonify({'error': 'Failed to check for updates'}), 500
-    except Exception as e:
-        logging.error(f"Unexpected error checking for updates: {e}")
-        return jsonify({'error': 'Failed to check for updates'}), 500
 
 @app.route('/get_available_ips')
 @permission_required('view_device')
@@ -2756,9 +2601,6 @@ def devices_by_tag(tag_id):
 def racks():
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT * FROM Rack')
         racks = cursor.fetchall()
@@ -2778,10 +2620,6 @@ def racks():
 @permission_required('add_rack')
 def add_rack():
     from flask import current_app
-    with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
     if request.method == 'POST':
         name = request.form['name']
         site = request.form['site']
@@ -2802,8 +2640,6 @@ def add_rack():
 def rack(rack_id):
     side = request.args.get('side', 'front')
     with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
         return render_rack_page(conn, rack_id, side)
 
 @app.route('/rack/<int:rack_id>/add_device', methods=['POST'])
@@ -2814,8 +2650,6 @@ def rack_add_device(rack_id):
     side = request.form['side']
     user_name = get_current_user_name()
     with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
         cursor = conn.cursor(dictionary=True)
         _, placement_error = check_rack_placement(cursor, rack_id, position_u, side)
         if placement_error == 'Rack not found':
@@ -2848,8 +2682,6 @@ def rack_add_nonnet_device(rack_id):
     side = request.form['side']
     user_name = get_current_user_name()
     with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
         cursor = conn.cursor(dictionary=True)
         _, placement_error = check_rack_placement(cursor, rack_id, position_u, side)
         if placement_error == 'Rack not found':
@@ -2876,9 +2708,6 @@ def rack_remove_device(rack_id):
     user_name = get_current_user_name()
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT device_id, nonnet_device_name, position_u, side FROM RackDevice WHERE id = %s', (rack_device_id,))
         rd = cursor.fetchone()
@@ -2903,9 +2732,6 @@ def delete_rack(rack_id):
     user_name = get_current_user_name()
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
         cursor = conn.cursor()
         cursor.execute('SELECT name FROM Rack WHERE id = %s', (rack_id,))
         rack_name = cursor.fetchone()
@@ -2920,9 +2746,6 @@ def delete_rack(rack_id):
 def export_rack_csv(rack_id):
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            abort(404)
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT * FROM Rack WHERE id = %s', (rack_id,))
         rack = cursor.fetchone()
@@ -3546,9 +3369,6 @@ def api_racks():
     """Get all racks"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            return jsonify({'error': 'Racks feature is disabled'}), 404
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id, name, site, height_u FROM Rack ORDER BY site, name')
         racks = cursor.fetchall()
@@ -3574,9 +3394,6 @@ def api_rack(rack_id):
     """Get a specific rack"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            return jsonify({'error': 'Racks feature is disabled'}), 404
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id, name, site, height_u FROM Rack WHERE id = %s', (rack_id,))
         rack = cursor.fetchone()
@@ -3613,9 +3430,6 @@ def api_add_rack():
         return jsonify({'error': 'height_u must be greater than zero'}), 400
     
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            return jsonify({'error': 'Racks feature is disabled'}), 404
         cursor = conn.cursor()
         cursor.execute('INSERT INTO Rack (name, site, height_u) VALUES (%s, %s, %s)', (name, site, height_u))
         rack_id = cursor.lastrowid
@@ -3629,9 +3443,6 @@ def api_delete_rack(rack_id):
     """Delete a rack"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            return jsonify({'error': 'Racks feature is disabled'}), 404
         cursor = conn.cursor()
         cursor.execute('SELECT name FROM Rack WHERE id = %s', (rack_id,))
         rack = cursor.fetchone()
@@ -3674,9 +3485,6 @@ def api_add_device_to_rack(rack_id):
             return jsonify({'error': 'device_id must be an integer'}), 400
     
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            return jsonify({'error': 'Racks feature is disabled'}), 404
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT name, height_u FROM Rack WHERE id = %s', (rack_id,))
         rack = cursor.fetchone()
@@ -3736,9 +3544,6 @@ def api_remove_device_from_rack(rack_id, rack_device_id):
     """Remove a device from a rack"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
-        if not is_feature_enabled('racks', conn=conn):
-            return jsonify({'error': 'Racks feature is disabled'}), 404
         cursor = conn.cursor(dictionary=True)
         cursor.execute('''
             SELECT rd.device_id, rd.nonnet_device_name, rd.position_u, rd.side,
@@ -3778,7 +3583,7 @@ def api_custom_fields_by_type(entity_type):
         cursor = conn.cursor(dictionary=True)
         cursor.execute('''
             SELECT id, entity_type, name, field_key, field_type, required, 
-                   default_value, help_text, display_order, validation_rules, searchable
+                   default_value, help_text, display_order, validation_rules
             FROM CustomFieldDefinition
             WHERE entity_type = %s
             ORDER BY display_order, name
@@ -3820,12 +3625,12 @@ def api_add_custom_field():
             cursor.execute('''
                 INSERT INTO CustomFieldDefinition 
                 (entity_type, name, field_key, field_type, required, default_value, 
-                 help_text, display_order, validation_rules, searchable)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 help_text, display_order, validation_rules)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (entity_type, data['name'], data['field_key'], data['field_type'],
                   data.get('required', False), data.get('default_value'),
                   data.get('help_text'), data.get('display_order', 0),
-                  validation_rules_json, data.get('searchable', False)))
+                  validation_rules_json))
             field_id = cursor.lastrowid
             add_audit_log(request.api_user['id'], 'add_custom_field',
                         f"Added custom field '{data['name']}' for {entity_type}", conn=conn)
@@ -3874,9 +3679,6 @@ def api_update_custom_field(field_id):
             validation_rules_json = json.dumps(data['validation_rules']) if data['validation_rules'] else None
             updates.append('validation_rules = %s')
             values.append(validation_rules_json)
-        if 'searchable' in data:
-            updates.append('searchable = %s')
-            values.append(data['searchable'])
         
         if not updates:
             return jsonify({'error': 'No changes to apply'}), 400
@@ -3987,9 +3789,6 @@ def api_tags():
     """Get all tags"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id, name, color, description, created_at FROM Tag ORDER BY name')
         tags = cursor.fetchall()
@@ -4002,11 +3801,6 @@ def api_tags():
 @api_permission_required('add_tag')
 def api_add_tag():
     """Create a new tag"""
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
     data = request.get_json()
     if not data or 'name' not in data:
         return jsonify({'error': 'Tag name is required'}), 400
@@ -4018,7 +3812,6 @@ def api_add_tag():
     color = data.get('color', '#6B7280')
     description = data.get('description', '')
     
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         try:
@@ -4036,9 +3829,6 @@ def api_tag(tag_id):
     """Get a specific tag"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id, name, color, description, created_at FROM Tag WHERE id = %s', (tag_id,))
         tag = cursor.fetchone()
@@ -4059,16 +3849,10 @@ def api_tag(tag_id):
 @api_permission_required('edit_tag')
 def api_update_tag(tag_id):
     """Update a tag"""
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Request body is required'}), 400
     
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT name, color, description FROM Tag WHERE id = %s', (tag_id,))
@@ -4113,9 +3897,6 @@ def api_delete_tag(tag_id):
     """Delete a tag"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
         cursor = conn.cursor()
         cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
         tag = cursor.fetchone()
@@ -4133,9 +3914,6 @@ def api_device_tags(device_id):
     """Get tags for a specific device"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id, name FROM Device WHERE id = %s', (device_id,))
         if not cursor.fetchone():
@@ -4154,9 +3932,6 @@ def api_device_tags(device_id):
 @api_permission_required('assign_device_tag')
 def api_assign_device_tag(device_id):
     """Assign a tag to a device"""
-    with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
     data = request.get_json()
     if not data or 'tag_id' not in data:
         return jsonify({'error': 'tag_id is required'}), 400
@@ -4180,8 +3955,6 @@ def api_assign_device_tag(device_id):
 def api_remove_device_tag(device_id, tag_id):
     """Remove a tag from a device"""
     with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('device_tags', conn=conn):
-            return jsonify({'error': 'Device tags feature is disabled'}), 404
         try:
             remove_tag_from_device(conn, device_id, tag_id, request.api_user['id'])
             conn.commit()
@@ -4373,21 +4146,14 @@ def api_roles():
 def bulk_operations():
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if bulk operations feature is enabled
-        if not is_feature_enabled('bulk_operations', conn=conn):
-            abort(404)
         cursor = conn.cursor()
         cursor.execute('SELECT id, name FROM Device ORDER BY name')
         devices = cursor.fetchall()
         cursor.execute('SELECT id, name, cidr, site FROM Subnet ORDER BY site, name')
         subnets = cursor.fetchall()
         
-        # Get tags only if device tags feature is enabled
-        tags_enabled = is_feature_enabled('device_tags', conn=conn)
-        tags = []
-        if tags_enabled:
-            cursor.execute('SELECT id, name FROM Tag ORDER BY name')
-            tags = cursor.fetchall()
+        cursor.execute('SELECT id, name FROM Tag ORDER BY name')
+        tags = cursor.fetchall()
         
         cursor.execute('SELECT id, name FROM DeviceType ORDER BY name')
         device_types = cursor.fetchall()
@@ -4404,17 +4170,11 @@ def bulk_operations():
 @app.route('/bulk/assign_ips', methods=['POST'])
 @permission_required('add_device_ip')
 def bulk_assign_ips():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        # Check if bulk operations feature is enabled
-        if not is_feature_enabled('bulk_operations', conn=conn):
-            abort(404)
     device_id = request.form['device_id']
     ip_ids = request.form.getlist('ip_ids[]')
     user_name = get_current_user_name()
     results = {'success': [], 'failed': []}
     
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         if not get_device_name(cursor, device_id):
@@ -4436,17 +4196,11 @@ def bulk_assign_ips():
 @app.route('/bulk/create_devices', methods=['POST'])
 @permission_required('add_device')
 def bulk_create_devices():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        # Check if bulk operations feature is enabled
-        if not is_feature_enabled('bulk_operations', conn=conn):
-            abort(404)
     device_names = request.form.get('device_names', '').strip().split('\n')
     device_type_id = int(request.form.get('device_type', 1))
     user_name = get_current_user_name()
     results = {'success': [], 'failed': []}
     
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         for name in device_names:
@@ -4467,20 +4221,11 @@ def bulk_create_devices():
 @app.route('/bulk/assign_tags', methods=['POST'])
 @permission_required('assign_device_tag')
 def bulk_assign_tags():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        # Check if bulk operations feature is enabled
-        if not is_feature_enabled('bulk_operations', conn=conn):
-            abort(404)
-        # Check if device tags feature is enabled
-        if not is_feature_enabled('device_tags', conn=conn):
-            abort(404)
     device_ids = request.form.getlist('device_ids[]')
     tag_ids = request.form.getlist('tag_ids[]')
     user_name = get_current_user_name()
     results = {'success': [], 'failed': []}
     
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         for device_id in device_ids:
@@ -4517,9 +4262,6 @@ def bulk_assign_tags():
 @app.route('/bulk/export_subnets', methods=['POST'])
 @permission_required('export_subnet_csv')
 def bulk_export_subnets():
-    with get_db_connection(current_app) as conn:
-        if not is_feature_enabled('bulk_operations', conn=conn):
-            abort(404)
     subnet_ids = request.form.getlist('subnet_ids[]')
     output = StringIO()
     writer = csv.writer(output)
@@ -4566,7 +4308,6 @@ def inject_env_vars():
         'LOGO_PNG': os.environ.get('LOGO_PNG', 'https://assets.jdbnet.co.uk/logo/128x128.png'),
         'VERSION': version,
         'has_permission': has_permission,
-        'is_feature_enabled': is_feature_enabled,
     }
 
 init_db(app)
