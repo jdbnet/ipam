@@ -38,619 +38,7 @@ app.config['MYSQL_USER'] = os.environ.get('MYSQL_USER', 'user')
 app.config['MYSQL_PASSWORD'] = os.environ.get('MYSQL_PASSWORD', 'password')
 app.config['MYSQL_DATABASE'] = os.environ.get('MYSQL_DATABASE', 'ipam')
 
-# ── Database: connection, crypto, schema init ───────────────────────────────
-def hash_password(password, salt=None):
-    if salt is None:
-        salt = base64.b64encode(os.urandom(16)).decode('utf-8')
-    salted = (salt + password).encode('utf-8')
-    hashed = hashlib.sha256(salted).hexdigest()
-    return f'{salt}${hashed}'
-
-def verify_password(password, hashed):
-    try:
-        salt, hash_val = hashed.split('$', 1)
-    except ValueError:
-        return False
-    return hash_password(password, salt) == hashed
-
-def generate_api_key():
-    """Generate a secure API key"""
-    return secrets.token_urlsafe(32)
-
-def get_db_connection(app=None):
-    if app is None:
-        app = current_app
-    conn = mysql.connector.connect(
-        host=app.config['MYSQL_HOST'],
-        user=app.config['MYSQL_USER'],
-        password=app.config['MYSQL_PASSWORD'],
-        database=app.config['MYSQL_DATABASE'],
-        autocommit=True
-    )
-    return conn
-
-def init_db(app=None):
-    if app is None:
-        app = current_app
-    conn = get_db_connection(app)
-    cursor = conn.cursor()
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS User (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL,
-        email VARCHAR(255) NOT NULL UNIQUE,
-        password VARCHAR(255) NOT NULL
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS Subnet (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL,
-        cidr VARCHAR(255) NOT NULL,
-        site VARCHAR(255)
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS AuditLog (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        user_id INTEGER,
-        action VARCHAR(255) NOT NULL,
-        details TEXT,
-        subnet_id INTEGER,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES User(id) ON DELETE SET NULL,
-        FOREIGN KEY (subnet_id) REFERENCES Subnet(id) ON DELETE SET NULL
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS IPAddress (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        ip VARCHAR(255) NOT NULL,
-        hostname VARCHAR(255),
-        subnet_id INTEGER NOT NULL,
-        FOREIGN KEY (subnet_id) REFERENCES Subnet (id)
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS DeviceType (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL UNIQUE,
-        icon_class VARCHAR(255) NOT NULL
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS Device (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL,
-        description TEXT,
-        device_type_id INTEGER DEFAULT 1,
-        FOREIGN KEY (device_type_id) REFERENCES DeviceType(id)
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS DeviceIPAddress (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        device_id INTEGER NOT NULL,
-        ip_id INTEGER NOT NULL,
-        FOREIGN KEY (device_id) REFERENCES Device (id),
-        FOREIGN KEY (ip_id) REFERENCES IPAddress (id)
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS DHCPPool (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        subnet_id INTEGER NOT NULL,
-        start_ip VARCHAR(255) NOT NULL,
-        end_ip VARCHAR(255) NOT NULL,
-        excluded_ips TEXT,
-        FOREIGN KEY (subnet_id) REFERENCES Subnet(id) ON DELETE CASCADE
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS Rack (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL,
-        site VARCHAR(255) NOT NULL,
-        height_u INTEGER NOT NULL
-    )
-    ''')
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS RackDevice (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        rack_id INTEGER NOT NULL,
-        device_id INTEGER,
-        position_u INTEGER NOT NULL,
-        side ENUM('front', 'back') NOT NULL,
-        nonnet_device_name VARCHAR(255),
-        FOREIGN KEY (rack_id) REFERENCES Rack(id) ON DELETE CASCADE,
-        FOREIGN KEY (device_id) REFERENCES Device(id) ON DELETE CASCADE
-    )
-    ''')
-    # Initialize default device types only if table is empty
-    cursor.execute('SELECT COUNT(*) FROM DeviceType')
-    if cursor.fetchone()[0] == 0:
-        cursor.executemany('INSERT INTO DeviceType (name, icon_class) VALUES (%s, %s)', [
-            ('Server', 'fa-server'),
-            ('Virtual Machine', 'fa-boxes-stacked'),
-            ('Switch', 'fa-network-wired'),
-            ('Firewall', 'fa-shield-halved'),
-            ('WiFi AP', 'fa-wifi'),
-            ('Printer', 'fa-print'),
-            ('Other', 'fa-question')
-        ])
-        conn.commit()  # Commit the inserts before querying
-    
-    # Add device_type_id column if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM Device LIKE 'device_type_id'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Device ADD COLUMN device_type_id INTEGER DEFAULT NULL')
-    
-    # Set default device_type_id for devices that don't have one
-    # Use the first available device type, or leave NULL if no types exist
-    cursor.execute('SELECT id FROM DeviceType ORDER BY id LIMIT 1')
-    first_type_result = cursor.fetchone()
-    if first_type_result:
-        first_type_id = first_type_result[0]
-        cursor.execute('UPDATE Device SET device_type_id = %s WHERE device_type_id IS NULL', (first_type_id,))
-    try:
-        cursor.execute('ALTER TABLE Device ADD CONSTRAINT fk_device_type FOREIGN KEY (device_type_id) REFERENCES DeviceType(id)')
-    except mysql.connector.Error as e:
-        if e.errno != 1061 and e.errno != 1826 and 'Duplicate' not in str(e):
-            raise
-    # Create Role table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS Role (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL UNIQUE,
-        description TEXT
-    )
-    ''')
-    
-    # Create Permission table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS Permission (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL UNIQUE,
-        description TEXT,
-        category VARCHAR(255)
-    )
-    ''')
-    
-    # Create RolePermission junction table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS RolePermission (
-        role_id INTEGER NOT NULL,
-        permission_id INTEGER NOT NULL,
-        PRIMARY KEY (role_id, permission_id),
-        FOREIGN KEY (role_id) REFERENCES Role(id) ON DELETE CASCADE,
-        FOREIGN KEY (permission_id) REFERENCES Permission(id) ON DELETE CASCADE
-    )
-    ''')
-    
-    # Add role_id column to User table if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM User LIKE 'role_id'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE User ADD COLUMN role_id INTEGER DEFAULT NULL')
-        try:
-            cursor.execute('ALTER TABLE User ADD CONSTRAINT fk_user_role FOREIGN KEY (role_id) REFERENCES Role(id)')
-        except mysql.connector.Error as e:
-            if e.errno != 1061 and e.errno != 1826 and 'Duplicate' not in str(e):
-                raise
-    
-    # Add api_key column to User table if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM User LIKE 'api_key'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE User ADD COLUMN api_key VARCHAR(255) DEFAULT NULL UNIQUE')
-    
-    # Add 2FA columns to User table if they don't exist
-    cursor.execute("SHOW COLUMNS FROM User LIKE 'totp_secret'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE User ADD COLUMN totp_secret VARCHAR(255) DEFAULT NULL')
-    
-    cursor.execute("SHOW COLUMNS FROM User LIKE 'totp_enabled'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE User ADD COLUMN totp_enabled BOOLEAN DEFAULT FALSE')
-    
-    cursor.execute("SHOW COLUMNS FROM User LIKE 'backup_codes'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE User ADD COLUMN backup_codes TEXT DEFAULT NULL')
-    
-    cursor.execute("SHOW COLUMNS FROM User LIKE 'two_fa_setup_complete'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE User ADD COLUMN two_fa_setup_complete BOOLEAN DEFAULT FALSE')
-    
-    # Add require_2fa column to Role table if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM Role LIKE 'require_2fa'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Role ADD COLUMN require_2fa BOOLEAN DEFAULT FALSE')
-    
-    # Ensure AuditLog foreign keys have ON DELETE SET NULL to preserve audit logs
-    # This is critical - audit logs should NEVER be deleted, even when referenced entities are deleted
-    try:
-        # Check and update user_id foreign key
-        cursor.execute('''
-            SELECT CONSTRAINT_NAME 
-            FROM information_schema.KEY_COLUMN_USAGE 
-            WHERE TABLE_SCHEMA = DATABASE() 
-            AND TABLE_NAME = 'AuditLog' 
-            AND COLUMN_NAME = 'user_id' 
-            AND REFERENCED_TABLE_NAME = 'User'
-        ''')
-        fk_user = cursor.fetchone()
-        if fk_user:
-            fk_name = fk_user[0]
-            # Drop and recreate with ON DELETE SET NULL
-            cursor.execute(f'ALTER TABLE AuditLog DROP FOREIGN KEY {fk_name}')
-            cursor.execute('ALTER TABLE AuditLog ADD CONSTRAINT fk_auditlog_user FOREIGN KEY (user_id) REFERENCES User(id) ON DELETE SET NULL')
-    except mysql.connector.Error as e:
-        # Foreign key might not exist or already be correct, continue
-        if e.errno != 1025 and e.errno != 1091:  # Not "Cannot drop foreign key" or "Unknown key"
-            logging.warning(f"Could not update AuditLog user_id foreign key: {e}")
-    
-    try:
-        # Check and update subnet_id foreign key
-        cursor.execute('''
-            SELECT CONSTRAINT_NAME 
-            FROM information_schema.KEY_COLUMN_USAGE 
-            WHERE TABLE_SCHEMA = DATABASE() 
-            AND TABLE_NAME = 'AuditLog' 
-            AND COLUMN_NAME = 'subnet_id' 
-            AND REFERENCED_TABLE_NAME = 'Subnet'
-        ''')
-        fk_subnet = cursor.fetchone()
-        if fk_subnet:
-            fk_name = fk_subnet[0]
-            # Drop and recreate with ON DELETE SET NULL
-            cursor.execute(f'ALTER TABLE AuditLog DROP FOREIGN KEY {fk_name}')
-            cursor.execute('ALTER TABLE AuditLog ADD CONSTRAINT fk_auditlog_subnet FOREIGN KEY (subnet_id) REFERENCES Subnet(id) ON DELETE SET NULL')
-    except mysql.connector.Error as e:
-        # Foreign key might not exist or already be correct, continue
-        if e.errno != 1025 and e.errno != 1091:  # Not "Cannot drop foreign key" or "Unknown key"
-            logging.warning(f"Could not update AuditLog subnet_id foreign key: {e}")
-    
-    # Create Tag table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS Tag (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL UNIQUE,
-        color VARCHAR(7) DEFAULT '#6B7280',
-        description TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Create DeviceTag junction table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS DeviceTag (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        device_id INTEGER NOT NULL,
-        tag_id INTEGER NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_device_tag (device_id, tag_id),
-        FOREIGN KEY (device_id) REFERENCES Device(id) ON DELETE CASCADE,
-        FOREIGN KEY (tag_id) REFERENCES Tag(id) ON DELETE CASCADE
-    )
-    ''')
-    
-    # Create CustomFieldDefinition table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS CustomFieldDefinition (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        entity_type ENUM('device', 'subnet') NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        field_key VARCHAR(255) NOT NULL UNIQUE,
-        field_type VARCHAR(50) NOT NULL,
-        required BOOLEAN DEFAULT FALSE,
-        default_value TEXT,
-        help_text TEXT,
-        display_order INTEGER DEFAULT 0,
-        validation_rules TEXT,
-        searchable BOOLEAN DEFAULT FALSE,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Add custom_fields column to Device table if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM Device LIKE 'custom_fields'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Device ADD COLUMN custom_fields TEXT DEFAULT NULL')
-        # Initialize existing records with empty JSON object
-        cursor.execute("UPDATE Device SET custom_fields = '{}' WHERE custom_fields IS NULL")
-    
-    # Add custom_fields column to Subnet table if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM Subnet LIKE 'custom_fields'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Subnet ADD COLUMN custom_fields TEXT DEFAULT NULL')
-        # Initialize existing records with empty JSON object
-        cursor.execute("UPDATE Subnet SET custom_fields = '{}' WHERE custom_fields IS NULL")
-    
-    # Add notes column to IPAddress table if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM IPAddress LIKE 'notes'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE IPAddress ADD COLUMN notes TEXT DEFAULT NULL')
-    
-    # Add VLAN columns to Subnet table if they don't exist
-    cursor.execute("SHOW COLUMNS FROM Subnet LIKE 'vlan_id'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Subnet ADD COLUMN vlan_id INTEGER DEFAULT NULL')
-    
-    cursor.execute("SHOW COLUMNS FROM Subnet LIKE 'vlan_description'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Subnet ADD COLUMN vlan_description VARCHAR(255) DEFAULT NULL')
-    
-    cursor.execute("SHOW COLUMNS FROM Subnet LIKE 'vlan_notes'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Subnet ADD COLUMN vlan_notes TEXT DEFAULT NULL')
-    
-    # Create FeatureFlags table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS FeatureFlags (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        feature_key VARCHAR(255) NOT NULL UNIQUE,
-        enabled BOOLEAN DEFAULT TRUE,
-        description TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Initialize default feature flags
-    default_features = [
-        ('racks', True, 'Enable rack management functionality'),
-        ('ip_address_notes', True, 'Enable IP address notes/descriptions editing on subnet page'),
-        ('device_tags', True, 'Enable device tagging functionality'),
-        ('bulk_operations', True, 'Enable bulk operations for devices and IPs')
-    ]
-    
-    for feature_key, enabled, description in default_features:
-        cursor.execute('SELECT id FROM FeatureFlags WHERE feature_key = %s', (feature_key,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO FeatureFlags (feature_key, enabled, description) VALUES (%s, %s, %s)',
-                          (feature_key, enabled, description))
-    
-    # Define all permissions with categories
-    permissions = [
-        # View permissions
-        ('view_index', 'View Home/Index page', 'View'),
-        ('view_devices', 'View Devices page', 'View'),
-        ('view_device', 'View Device details', 'View'),
-        ('view_subnet', 'View Subnet details', 'View'),
-        ('view_racks', 'View Racks page', 'View'),
-        ('view_rack', 'View Rack details', 'View'),
-        ('view_audit', 'View Audit Log', 'View'),
-        ('view_admin', 'View Admin panel', 'View'),
-        ('view_users', 'View Users page', 'View'),
-        ('view_device_types', 'View Device Types page', 'View'),
-        ('view_device_type_stats', 'View Device Type Statistics', 'View'),
-        ('view_devices_by_type', 'View Devices by Type', 'View'),
-        ('view_dhcp', 'View DHCP configuration', 'View'),
-        ('view_help', 'View Help page', 'View'),
-        
-        # Device permissions
-        ('add_device', 'Add new device', 'Device'),
-        ('edit_device', 'Edit device (rename, description, type)', 'Device'),
-        ('delete_device', 'Delete device', 'Device'),
-        ('add_device_ip', 'Add IP address to device', 'Device'),
-        ('remove_device_ip', 'Remove IP address from device', 'Device'),
-        
-        # Subnet permissions
-        ('add_subnet', 'Add new subnet', 'Subnet'),
-        ('edit_subnet', 'Edit subnet (name, CIDR, site)', 'Subnet'),
-        ('delete_subnet', 'Delete subnet', 'Subnet'),
-        ('export_subnet_csv', 'Export subnet as CSV', 'Subnet'),
-        
-        # Rack permissions
-        ('add_rack', 'Add new rack', 'Rack'),
-        ('delete_rack', 'Delete rack', 'Rack'),
-        ('add_device_to_rack', 'Add device to rack', 'Rack'),
-        ('remove_device_from_rack', 'Remove device from rack', 'Rack'),
-        ('add_nonnet_device_to_rack', 'Add non-networked device to rack', 'Rack'),
-        ('export_rack_csv', 'Export rack as CSV', 'Rack'),
-        
-        # DHCP permissions
-        ('configure_dhcp', 'Configure DHCP pools', 'DHCP'),
-        
-        # Device Type permissions
-        ('add_device_type', 'Add device type', 'Device Type'),
-        ('edit_device_type', 'Edit device type', 'Device Type'),
-        ('delete_device_type', 'Delete device type', 'Device Type'),
-        
-        # Tag permissions
-        ('view_tags', 'View tags', 'Tag'),
-        ('add_tag', 'Add new tag', 'Tag'),
-        ('edit_tag', 'Edit tag', 'Tag'),
-        ('delete_tag', 'Delete tag', 'Tag'),
-        ('assign_device_tag', 'Assign tag to device', 'Tag'),
-        ('remove_device_tag', 'Remove tag from device', 'Tag'),
-        
-        # Custom Fields permissions
-        ('view_custom_fields', 'View custom fields', 'Custom Fields'),
-        ('manage_custom_fields', 'Manage custom fields (add, edit, delete)', 'Custom Fields'),
-        
-        # Admin permissions
-        ('manage_users', 'Manage users (add, edit, delete)', 'Admin'),
-        ('manage_roles', 'Manage roles and permissions', 'Admin'),
-    ]
-    
-    # Insert permissions
-    for perm_name, perm_desc, perm_category in permissions:
-        cursor.execute('SELECT id FROM Permission WHERE name = %s', (perm_name,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO Permission (name, description, category) VALUES (%s, %s, %s)',
-                          (perm_name, perm_desc, perm_category))
-    
-    # Create default roles if they don't exist
-    cursor.execute('SELECT id FROM Role WHERE name = %s', ('admin',))
-    admin_role = cursor.fetchone()
-    if not admin_role:
-        cursor.execute('INSERT INTO Role (name, description) VALUES (%s, %s)',
-                      ('admin', 'Administrator with full access to all features'))
-        admin_role_id = cursor.lastrowid
-    else:
-        admin_role_id = admin_role[0]
-    
-    cursor.execute('SELECT id FROM Role WHERE name = %s', ('user',))
-    user_role = cursor.fetchone()
-    if not user_role:
-        cursor.execute('INSERT INTO Role (name, description) VALUES (%s, %s)',
-                      ('user', 'Standard user with access to most features except admin functions'))
-        user_role_id = cursor.lastrowid
-    else:
-        user_role_id = user_role[0]
-    
-    cursor.execute('SELECT id FROM Role WHERE name = %s', ('view_only',))
-    view_only_role = cursor.fetchone()
-    if not view_only_role:
-        cursor.execute('INSERT INTO Role (name, description) VALUES (%s, %s)',
-                      ('view_only', 'View-only user with read-only access to all pages'))
-        view_only_role_id = cursor.lastrowid
-    else:
-        view_only_role_id = view_only_role[0]
-    
-    # Assign all permissions to admin role
-    cursor.execute('SELECT id FROM Permission')
-    all_permission_ids = [row[0] for row in cursor.fetchall()]
-    for perm_id in all_permission_ids:
-        cursor.execute('SELECT role_id FROM RolePermission WHERE role_id = %s AND permission_id = %s',
-                      (admin_role_id, perm_id))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO RolePermission (role_id, permission_id) VALUES (%s, %s)',
-                          (admin_role_id, perm_id))
-    
-    # Assign non-admin permissions to user role
-    non_admin_permissions = [
-        'view_index', 'view_devices', 'view_device', 'view_subnet', 'view_racks', 'view_rack',
-        'view_audit', 'view_device_types', 'view_device_type_stats', 'view_devices_by_type',
-        'view_dhcp', 'view_help',
-        'add_device', 'edit_device', 'delete_device', 'add_device_ip', 'remove_device_ip',
-        'add_subnet', 'edit_subnet', 'delete_subnet', 'export_subnet_csv',
-        'add_rack', 'delete_rack', 'add_device_to_rack', 'remove_device_from_rack',
-        'add_nonnet_device_to_rack', 'export_rack_csv',
-        'configure_dhcp',
-        'add_device_type', 'edit_device_type', 'delete_device_type',
-        'view_tags', 'add_tag', 'edit_tag', 'delete_tag', 'assign_device_tag', 'remove_device_tag',
-        'view_custom_fields', 'manage_custom_fields'
-    ]
-    
-    for perm_name in non_admin_permissions:
-        cursor.execute('SELECT id FROM Permission WHERE name = %s', (perm_name,))
-        perm_result = cursor.fetchone()
-        if perm_result:
-            perm_id = perm_result[0]
-            cursor.execute('SELECT role_id FROM RolePermission WHERE role_id = %s AND permission_id = %s',
-                          (user_role_id, perm_id))
-            if not cursor.fetchone():
-                cursor.execute('INSERT INTO RolePermission (role_id, permission_id) VALUES (%s, %s)',
-                              (user_role_id, perm_id))
-    
-    # Assign view-only permissions to view_only role
-    # Same view permissions as user role, but excluding admin views (view_admin, view_users)
-    view_only_permissions = [
-        'view_index', 'view_devices', 'view_device', 'view_subnet', 'view_racks', 'view_rack',
-        'view_audit', 'view_device_types', 'view_device_type_stats', 'view_devices_by_type',
-        'view_dhcp', 'view_help', 'view_tags', 'view_custom_fields'
-    ]
-    
-    for perm_name in view_only_permissions:
-        cursor.execute('SELECT id FROM Permission WHERE name = %s', (perm_name,))
-        perm_result = cursor.fetchone()
-        if perm_result:
-            perm_id = perm_result[0]
-            cursor.execute('SELECT role_id FROM RolePermission WHERE role_id = %s AND permission_id = %s',
-                          (view_only_role_id, perm_id))
-            if not cursor.fetchone():
-                cursor.execute('INSERT INTO RolePermission (role_id, permission_id) VALUES (%s, %s)',
-                              (view_only_role_id, perm_id))
-    
-    # Assign existing users to 'admin' role if they don't have a role
-    # This ensures existing users maintain admin access
-    cursor.execute('UPDATE User SET role_id = %s WHERE role_id IS NULL', (admin_role_id,))
-    
-    # Generate API keys for users that don't have one
-    cursor.execute('SELECT id FROM User WHERE api_key IS NULL')
-    users_without_api_key = cursor.fetchall()
-    for (user_id,) in users_without_api_key:
-        api_key = generate_api_key()
-        cursor.execute('UPDATE User SET api_key = %s WHERE id = %s', (api_key, user_id))
-    
-    cursor.execute('SELECT COUNT(*) FROM User')
-    if cursor.fetchone()[0] == 0:
-        api_key = generate_api_key()
-        cursor.execute('''INSERT INTO User (name, email, password, role_id, api_key) VALUES (%s, %s, %s, %s, %s)''',
-            ('admin', 'admin@example.com', hash_password('password'), admin_role_id, api_key))
-    
-    # Create indexes for performance optimization
-    logging.info("Creating database indexes for performance...")
-    
-    def create_index_if_not_exists(cursor, index_name, table_name, columns):
-        """Helper function to create index if it doesn't exist"""
-        try:
-            # Check if index exists
-            cursor.execute('''
-                SELECT COUNT(*) FROM information_schema.statistics 
-                WHERE table_schema = DATABASE() 
-                AND table_name = %s 
-                AND index_name = %s
-            ''', (table_name, index_name))
-            if cursor.fetchone()[0] == 0:
-                cursor.execute(f'CREATE INDEX {index_name} ON {table_name}({columns})')
-                logging.info(f"Created index {index_name}")
-            else:
-                logging.debug(f"Index {index_name} already exists")
-        except mysql.connector.Error as e:
-            logging.warning(f"Could not create index {index_name}: {e}")
-    
-    # IPAddress table indexes
-    create_index_if_not_exists(cursor, 'idx_ipaddress_subnet_id', 'IPAddress', 'subnet_id')
-    create_index_if_not_exists(cursor, 'idx_ipaddress_hostname', 'IPAddress', 'hostname')
-    create_index_if_not_exists(cursor, 'idx_ipaddress_ip', 'IPAddress', 'ip')
-    create_index_if_not_exists(cursor, 'idx_ipaddress_subnet_hostname', 'IPAddress', 'subnet_id, hostname')
-    create_index_if_not_exists(cursor, 'idx_ipaddress_notes', 'IPAddress', 'notes(255)')
-    
-    # DeviceIPAddress table indexes
-    create_index_if_not_exists(cursor, 'idx_deviceipaddress_device_id', 'DeviceIPAddress', 'device_id')
-    create_index_if_not_exists(cursor, 'idx_deviceipaddress_ip_id', 'DeviceIPAddress', 'ip_id')
-    create_index_if_not_exists(cursor, 'idx_deviceipaddress_device_ip', 'DeviceIPAddress', 'device_id, ip_id')
-    
-    # AuditLog table indexes
-    create_index_if_not_exists(cursor, 'idx_auditlog_timestamp', 'AuditLog', 'timestamp')
-    create_index_if_not_exists(cursor, 'idx_auditlog_user_id', 'AuditLog', 'user_id')
-    create_index_if_not_exists(cursor, 'idx_auditlog_subnet_id', 'AuditLog', 'subnet_id')
-    create_index_if_not_exists(cursor, 'idx_auditlog_action', 'AuditLog', 'action')
-    create_index_if_not_exists(cursor, 'idx_auditlog_user_timestamp', 'AuditLog', 'user_id, timestamp')
-    create_index_if_not_exists(cursor, 'idx_auditlog_subnet_timestamp', 'AuditLog', 'subnet_id, timestamp')
-    
-    # Subnet table indexes
-    create_index_if_not_exists(cursor, 'idx_subnet_site', 'Subnet', 'site')
-    create_index_if_not_exists(cursor, 'idx_subnet_site_name', 'Subnet', 'site, name')
-    
-    # DeviceTag table indexes
-    create_index_if_not_exists(cursor, 'idx_devicetag_device_id', 'DeviceTag', 'device_id')
-    create_index_if_not_exists(cursor, 'idx_devicetag_tag_id', 'DeviceTag', 'tag_id')
-    
-    # DHCPPool table indexes
-    create_index_if_not_exists(cursor, 'idx_dhcppool_subnet_id', 'DHCPPool', 'subnet_id')
-    
-    # RackDevice table indexes
-    create_index_if_not_exists(cursor, 'idx_rackdevice_rack_id', 'RackDevice', 'rack_id')
-    create_index_if_not_exists(cursor, 'idx_rackdevice_device_id', 'RackDevice', 'device_id')
-    create_index_if_not_exists(cursor, 'idx_rackdevice_rack_side', 'RackDevice', 'rack_id, side')
-    
-    # Device table indexes
-    create_index_if_not_exists(cursor, 'idx_device_device_type_id', 'Device', 'device_type_id')
-    
-    # User table indexes (api_key already has UNIQUE index)
-    create_index_if_not_exists(cursor, 'idx_user_role_id', 'User', 'role_id')
-    
-    # CustomFieldDefinition table indexes
-    create_index_if_not_exists(cursor, 'idx_customfield_entity_type', 'CustomFieldDefinition', 'entity_type')
-    create_index_if_not_exists(cursor, 'idx_customfield_field_key', 'CustomFieldDefinition', 'field_key')
-    create_index_if_not_exists(cursor, 'idx_customfield_entity_order', 'CustomFieldDefinition', 'entity_type, display_order')
-    
-    logging.info("Database indexes created successfully")
-    conn.commit()
-    conn.close()
+from db import init_db, hash_password, get_db_connection, verify_password, generate_api_key
 
 # ── TOTP / 2FA helpers ───────────────────────────────────────────────────────
 def generate_totp_secret():
@@ -1399,30 +787,326 @@ def create_subnet_from_cidr(conn, name, cidr, site, vlan_id, vlan_description, v
     return subnet_id
 
 
-def build_audit_filter_clause(args):
-    """Build WHERE clause fragment and params from request args dict."""
+def build_audit_filter_clause(request_args):
+    """Build SQL AND-clause fragment and params for audit list/export queries."""
     conditions = []
     params = []
-    if args.get('user_id'):
-        conditions.append('al.user_id = %s')
-        params.append(args['user_id'])
-    if args.get('action'):
-        conditions.append('al.action = %s')
-        params.append(args['action'])
-    if args.get('subnet_id'):
-        conditions.append('al.subnet_id = %s')
-        params.append(args['subnet_id'])
-    if args.get('date_from'):
-        conditions.append('al.timestamp >= %s')
-        params.append(args['date_from'])
-    if args.get('date_to'):
-        conditions.append('al.timestamp <= %s')
-        params.append(args['date_to'])
-    if args.get('search'):
-        conditions.append('al.details LIKE %s')
-        params.append(f"%{args['search']}%")
+    user_ids = request_args.getlist('user_ids') if hasattr(request_args, 'getlist') else []
+    if user_ids:
+        placeholders = ','.join(['%s'] * len(user_ids))
+        conditions.append(f'AuditLog.user_id IN ({placeholders})')
+        params.extend(user_ids)
+    subnet_id = request_args.get('subnet_id')
+    if subnet_id:
+        conditions.append('AuditLog.subnet_id = %s')
+        params.append(subnet_id)
+    action = request_args.get('action')
+    if action:
+        conditions.append('AuditLog.action = %s')
+        params.append(action)
+    device_name = request_args.get('device_name')
+    if device_name:
+        conditions.append('AuditLog.details LIKE %s')
+        params.append(f'%{device_name}%')
+    date_from = request_args.get('date_from')
+    if date_from:
+        conditions.append('AuditLog.timestamp >= %s')
+        params.append(date_from)
+    date_to = request_args.get('date_to')
+    if date_to:
+        conditions.append('AuditLog.timestamp <= %s')
+        params.append(date_to + ' 23:59:59')
+    search_query = request_args.get('search', '')
+    if hasattr(request_args, 'get'):
+        search_query = (search_query or '').strip()
+    if search_query:
+        conditions.append(
+            "(AuditLog.details LIKE %s OR COALESCE(User.name, '') LIKE %s "
+            "OR AuditLog.action LIKE %s OR COALESCE(Subnet.name, '') LIKE %s)"
+        )
+        pattern = f'%{search_query}%'
+        params.extend([pattern, pattern, pattern, pattern])
     where = (' AND ' + ' AND '.join(conditions)) if conditions else ''
     return where, params
+
+
+def configure_dhcp_pool(cursor, subnet_id, start_ip, end_ip, excluded_ips, subnet_name, subnet_cidr, user_id, conn, is_update):
+    """Create or update a DHCP pool and mark IPs as DHCP-reserved."""
+    excluded_ips = (excluded_ips or '').replace(' ', '')
+    excluded_list = [ip for ip in excluded_ips.split(',') if ip]
+    cursor.execute('SELECT ip FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
+    all_ips = [row[0] for row in cursor.fetchall()]
+    if start_ip not in all_ips or end_ip not in all_ips:
+        raise ValueError('Start and End IP must be within the subnet.')
+    cursor.execute('UPDATE IPAddress SET hostname=NULL WHERE subnet_id=%s AND hostname="DHCP"', (subnet_id,))
+    if is_update:
+        cursor.execute(
+            'UPDATE DHCPPool SET start_ip = %s, end_ip = %s, excluded_ips = %s WHERE subnet_id = %s',
+            (start_ip, end_ip, excluded_ips, subnet_id),
+        )
+        action = 'dhcp_pool_update'
+        details = f"Updated DHCP pool for subnet {subnet_name} ({subnet_cidr}): {start_ip} - {end_ip}, excluded: {excluded_ips}"
+    else:
+        cursor.execute(
+            'INSERT INTO DHCPPool (subnet_id, start_ip, end_ip, excluded_ips) VALUES (%s, %s, %s, %s)',
+            (subnet_id, start_ip, end_ip, excluded_ips),
+        )
+        action = 'dhcp_pool_create'
+        details = f"Created DHCP pool for subnet {subnet_name} ({subnet_cidr}): {start_ip} - {end_ip}, excluded: {excluded_ips}"
+    in_range = False
+    for ip in all_ips:
+        if ip == start_ip:
+            in_range = True
+        if in_range and ip not in excluded_list:
+            cursor.execute('UPDATE IPAddress SET hostname="DHCP" WHERE subnet_id=%s AND ip=%s', (subnet_id, ip))
+        if ip == end_ip:
+            break
+    add_audit_log(user_id, action, details, subnet_id, conn=conn)
+    return {'start_ip': start_ip, 'end_ip': end_ip, 'excluded_ips': excluded_ips}
+
+
+def remove_dhcp_pool(cursor, subnet_id, subnet_name, subnet_cidr, user_id, conn):
+    cursor.execute('DELETE FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
+    cursor.execute('UPDATE IPAddress SET hostname=NULL WHERE subnet_id=%s AND hostname="DHCP"', (subnet_id,))
+    add_audit_log(user_id, 'dhcp_pool_remove', f"Removed DHCP pool for subnet {subnet_name} ({subnet_cidr})", subnet_id, conn=conn)
+
+
+def assign_tag_to_device(conn, device_id, tag_id, user_id):
+    """Assign tag to device. Returns (device_name, tag_name) or raises ValueError."""
+    cursor = conn.cursor()
+    device_name = get_device_name(cursor, device_id)
+    if not device_name:
+        raise ValueError('Device not found')
+    cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
+    tag_row = cursor.fetchone()
+    if not tag_row:
+        raise ValueError('Tag not found')
+    tag_name = tag_row[0]
+    cursor.execute('SELECT id FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
+    if cursor.fetchone():
+        raise ValueError('Tag already assigned')
+    cursor.execute('INSERT INTO DeviceTag (device_id, tag_id) VALUES (%s, %s)', (device_id, tag_id))
+    add_audit_log(user_id, 'assign_device_tag', f"Assigned tag '{tag_name}' to device '{device_name}'", conn=conn)
+    return device_name, tag_name
+
+
+def remove_tag_from_device(conn, device_id, tag_id, user_id):
+    """Remove tag from device. Returns (device_name, tag_name) or raises ValueError."""
+    cursor = conn.cursor()
+    device_name = get_device_name(cursor, device_id)
+    if not device_name:
+        raise ValueError('Device not found')
+    cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
+    tag_row = cursor.fetchone()
+    if not tag_row:
+        raise ValueError('Tag not found')
+    tag_name = tag_row[0]
+    cursor.execute('SELECT id FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
+    if not cursor.fetchone():
+        raise ValueError('Tag not assigned')
+    cursor.execute('DELETE FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
+    add_audit_log(user_id, 'remove_device_tag', f"Removed tag '{tag_name}' from device '{device_name}'", conn=conn)
+    return device_name, tag_name
+
+
+def update_entity_custom_fields(conn, entity_type, entity_id, submitted_data, user_id, is_json=False):
+    """Validate and save custom field values. Returns list of errors (empty if ok)."""
+    table = 'Device' if entity_type == 'device' else 'Subnet'
+    audit_action = f'update_{entity_type}_custom_fields'
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        'SELECT id, field_key, field_type, required, validation_rules FROM CustomFieldDefinition WHERE entity_type = %s',
+        (entity_type,),
+    )
+    field_defs = {f['field_key']: f for f in cursor.fetchall()}
+    new_values = {}
+    errors = []
+    for field_key, field_def in field_defs.items():
+        submitted_value = submitted_data.get(f'custom_field_{field_key}', '')
+        validation_rules = field_def.get('validation_rules')
+        if isinstance(validation_rules, str):
+            try:
+                validation_rules = json.loads(validation_rules)
+            except json.JSONDecodeError:
+                validation_rules = {}
+        elif validation_rules is None:
+            validation_rules = {}
+        field_def['validation_rules'] = validation_rules
+        if submitted_value == '' and not field_def.get('required'):
+            continue
+        is_valid, error_msg = validate_custom_field_value(field_def, submitted_value)
+        if not is_valid:
+            errors.append(error_msg)
+        else:
+            parsed_value = parse_custom_field_value(field_def['field_type'], submitted_value)
+            if parsed_value is not None:
+                new_values[field_key] = parsed_value
+    if errors:
+        return errors
+    cursor.execute(f'UPDATE {table} SET custom_fields = %s WHERE id = %s', (json.dumps(new_values), entity_id))
+    add_audit_log(user_id, audit_action, f"Updated custom fields for {entity_type} {entity_id}", conn=conn)
+    return []
+
+
+def build_validation_rules_from_form(form, field_type=None):
+    """Build validation_rules JSON from custom field form data."""
+    rules = {}
+    if field_type is None or field_type in ('text', 'textarea'):
+        if form.get('min_length'):
+            rules['min_length'] = int(form['min_length'])
+        if form.get('max_length'):
+            rules['max_length'] = int(form['max_length'])
+        if form.get('regex_pattern'):
+            rules['regex_pattern'] = form['regex_pattern']
+    if field_type is None or field_type in ('number', 'decimal'):
+        if form.get('min_value'):
+            rules['min_value'] = float(form['min_value'])
+        if form.get('max_value'):
+            rules['max_value'] = float(form['max_value'])
+    if field_type is None or field_type == 'select':
+        if form.get('select_options'):
+            rules['select_options'] = [o.strip() for o in form['select_options'].split(',') if o.strip()]
+    return json.dumps(rules) if rules else None
+
+
+def process_2fa_setup_request(request, user_id, template_name, complete_login=False):
+    """Handle generate/verify steps for 2FA setup. Returns a Flask response."""
+    if request.method != 'POST':
+        return render_with_user(template_name, step='generate')
+    action = request.form.get('action')
+    if action == 'generate':
+        secret = generate_totp_secret()
+        session['temp_totp_secret'] = secret
+        with get_db_connection(current_app) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT email FROM User WHERE id = %s', (user_id,))
+            email = cursor.fetchone()[0]
+        totp_uri = get_totp_uri(secret, email)
+        qr_code = generate_qr_code(totp_uri)
+        return render_with_user(template_name, secret=secret, qr_code=qr_code, email=email, step='verify')
+    if action == 'verify':
+        code = request.form.get('code', '').strip()
+        secret = session.get('temp_totp_secret')
+        if not secret:
+            return render_with_user(template_name, error='Session expired. Please start over.', step='generate')
+        if not verify_totp(secret, code):
+            return render_with_user(template_name, error='Invalid code. Please try again.', secret=secret, step='verify')
+        backup_codes = generate_backup_codes()
+        backup_codes_json = json.dumps(backup_codes)
+        with get_db_connection(current_app) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE User SET totp_secret = %s, totp_enabled = TRUE, backup_codes = %s, two_fa_setup_complete = TRUE
+                WHERE id = %s
+            ''', (secret, backup_codes_json, user_id))
+        session.pop('temp_totp_secret', None)
+        if complete_login:
+            session['logged_in'] = True
+            session['user_id'] = user_id
+            session.pop('pending_user_id', None)
+            session.pop('pending_email', None)
+            session.modified = True
+        logging.info(f"User {user_id} enabled 2FA successfully.")
+        return render_with_user(template_name, backup_codes=format_backup_codes(backup_codes), step='backup_codes')
+    return render_with_user(template_name, step='generate')
+
+
+def load_rack_view(conn, rack_id, side='front', networked_only=True):
+    """Load rack page context: rack dict, rack_devices, site_devices."""
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute('SELECT * FROM Rack WHERE id = %s', (rack_id,))
+    rack = cursor.fetchone()
+    if not rack:
+        return None
+    cursor.execute('SELECT * FROM RackDevice WHERE rack_id = %s', (rack_id,))
+    rack_devices = cursor.fetchall()
+    device_ids = [rd['device_id'] for rd in rack_devices if rd['device_id']]
+    device_names = {}
+    if device_ids:
+        fmt = ','.join(['%s'] * len(device_ids))
+        cursor.execute(f'SELECT id, name FROM Device WHERE id IN ({fmt})', tuple(device_ids))
+        for row in cursor.fetchall():
+            device_names[row['id']] = row['name']
+    for rd in rack_devices:
+        if rd['device_id']:
+            rd['device_name'] = device_names.get(rd['device_id'], 'Unknown')
+        else:
+            rd['device_name'] = rd['nonnet_device_name']
+    if networked_only:
+        cursor.execute('''
+            SELECT DISTINCT Device.id, Device.name, Device.device_type_id, Device.description
+            FROM Device JOIN DeviceIPAddress ON Device.id = DeviceIPAddress.device_id
+            JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id
+            JOIN Subnet ON IPAddress.subnet_id = Subnet.id
+            WHERE Device.device_type_id NOT IN (2, 6) AND Subnet.site = %s
+        ''', (rack['site'],))
+    else:
+        cursor.execute('SELECT id, name, device_type_id, description FROM Device WHERE device_type_id NOT IN (2, 6)')
+    site_devices = cursor.fetchall()
+    return {'rack': rack, 'rack_devices': rack_devices, 'site_devices': site_devices, 'current_side': side}
+
+
+def render_rack_page(conn, rack_id, side, error=None):
+    ctx = load_rack_view(conn, rack_id, side)
+    if not ctx:
+        return 'Rack not found', 404
+    if error:
+        ctx['error'] = error
+    return render_with_user('rack.html', **ctx)
+
+
+def fetch_subnet_ip_rows(cursor, subnet_id):
+    cursor.execute('''
+        SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
+        FROM IPAddress ip
+        LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+        LEFT JOIN Device d ON dia.device_id = d.id
+        WHERE ip.subnet_id = %s
+        ORDER BY INET_ATON(ip.ip)
+    ''', (subnet_id,))
+    return cursor.fetchall()
+
+
+def subnet_ip_csv_rows(ip_rows):
+    """Convert IP query rows to CSV data rows."""
+    rows = []
+    for ip in ip_rows:
+        device_desc = ip[4] or ''
+        ip_notes = ip[5] if len(ip) > 5 and ip[5] else ''
+        combined_desc = device_desc
+        if ip_notes:
+            combined_desc = f"{combined_desc}\n{ip_notes}" if combined_desc else ip_notes
+        rows.append([ip[1] or '', ip[2] or '', combined_desc])
+    return rows
+
+
+def csv_attachment(rows, headers, filename):
+    output = StringIO()
+    writer = csv.writer(output)
+    if headers:
+        writer.writerow(headers)
+    writer.writerows(rows)
+    output_bytes = BytesIO(output.getvalue().encode('utf-8'))
+    output_bytes.seek(0)
+    return send_file(output_bytes, mimetype='text/csv', as_attachment=True, download_name=filename)
+
+
+def check_rack_placement(cursor, rack_id, position_u, side):
+    """Return (height_u, error_message). height_u is None if rack not found."""
+    cursor.execute('SELECT height_u FROM Rack WHERE id = %s', (rack_id,))
+    rack = cursor.fetchone()
+    if not rack:
+        return None, 'Rack not found'
+    height_u = rack['height_u']
+    if position_u < 1 or position_u > height_u:
+        return height_u, f"Invalid U position: {position_u}. Rack is {height_u}U tall."
+    cursor.execute(
+        'SELECT COUNT(*) AS cnt FROM RackDevice WHERE rack_id = %s AND position_u = %s AND side = %s',
+        (rack_id, position_u, side),
+    )
+    if cursor.fetchone()['cnt'] > 0:
+        return height_u, f"U{position_u} on the {side} is already occupied."
+    return height_u, None
 
 
 def group_devices_by_site(devices):
@@ -1518,67 +1202,12 @@ def logout():
 
 @app.route('/setup-2fa', methods=['GET', 'POST'])
 def setup_2fa():
-    from flask import current_app
-    import json
-    
-    # If already logged in, redirect to index
     if session.get('logged_in'):
         return redirect(url_for('index'))
-    
     pending_user_id = session.get('pending_user_id')
     if not pending_user_id:
         return redirect(url_for('login'))
-    
-    if request.method == 'POST':
-        action = request.form.get('action')
-        
-        if action == 'generate':
-            # Generate new TOTP secret
-            secret = generate_totp_secret()
-            session['temp_totp_secret'] = secret
-            with get_db_connection(current_app) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT email FROM User WHERE id = %s', (pending_user_id,))
-                email = cursor.fetchone()[0]
-            
-            totp_uri = get_totp_uri(secret, email)
-            qr_code = generate_qr_code(totp_uri)
-            return render_with_user('setup_2fa.html', secret=secret, qr_code=qr_code, email=email, step='verify')
-        
-        elif action == 'verify':
-            code = request.form.get('code', '').strip()
-            secret = session.get('temp_totp_secret')
-            
-            if not secret:
-                return render_with_user('setup_2fa.html', error='Session expired. Please start over.', step='generate')
-            
-            if verify_totp(secret, code):
-                # Save TOTP secret and generate backup codes
-                backup_codes = generate_backup_codes()
-                backup_codes_json = json.dumps(backup_codes)
-                
-                with get_db_connection(current_app) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        UPDATE User 
-                        SET totp_secret = %s, totp_enabled = TRUE, backup_codes = %s, two_fa_setup_complete = TRUE
-                        WHERE id = %s
-                    ''', (secret, backup_codes_json, pending_user_id))
-                
-                session.pop('temp_totp_secret', None)
-                session['logged_in'] = True
-                session['user_id'] = pending_user_id
-                session.pop('pending_user_id', None)
-                session.pop('pending_email', None)
-                session.modified = True  # Ensure session is saved
-                
-                formatted_codes = format_backup_codes(backup_codes)
-                logging.info(f"User {pending_user_id} enabled 2FA successfully.")
-                return render_with_user('setup_2fa.html', backup_codes=formatted_codes, step='backup_codes')
-            else:
-                return render_with_user('setup_2fa.html', error='Invalid code. Please try again.', secret=secret, step='verify')
-    
-    return render_with_user('setup_2fa.html', step='generate')
+    return process_2fa_setup_request(request, pending_user_id, 'setup_2fa.html', complete_login=True)
 
 @app.route('/verify-2fa', methods=['GET', 'POST'])
 def verify_2fa():
@@ -1920,58 +1549,28 @@ def device_delete_ip(device_id):
 @permission_required('assign_device_tag')
 def device_assign_tag(device_id):
     tag_id = request.form['tag_id']
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
         if not is_feature_enabled('device_tags', conn=conn):
             abort(404)
-        cursor = conn.cursor()
-        cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-        device = cursor.fetchone()
-        if not device:
-            return redirect(url_for('devices'))
-        device_name = device[0]
-        
-        cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
-        tag = cursor.fetchone()
-        if not tag:
-            return redirect(url_for('device', device_id=device_id))
-        tag_name = tag[0]
-        
-        cursor.execute('SELECT id FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
-        if cursor.fetchone():
-            return redirect(url_for('device', device_id=device_id))  # Already assigned
-        
-        cursor.execute('INSERT INTO DeviceTag (device_id, tag_id) VALUES (%s, %s)', (device_id, tag_id))
-        add_audit_log(session['user_id'], 'assign_device_tag', f"Assigned tag '{tag_name}' to device '{device_name}'", conn=conn)
-        conn.commit()
+        try:
+            assign_tag_to_device(conn, device_id, tag_id, session['user_id'])
+            conn.commit()
+        except ValueError:
+            pass
     return redirect(url_for('device', device_id=device_id))
 
 @app.route('/device/<int:device_id>/remove_tag', methods=['POST'])
 @permission_required('remove_device_tag')
 def device_remove_tag(device_id):
     tag_id = request.form['tag_id']
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
         if not is_feature_enabled('device_tags', conn=conn):
             abort(404)
-        cursor = conn.cursor()
-        cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-        device = cursor.fetchone()
-        if not device:
-            return redirect(url_for('devices'))
-        device_name = device[0]
-        
-        cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
-        tag = cursor.fetchone()
-        if not tag:
-            return redirect(url_for('device', device_id=device_id))
-        tag_name = tag[0]
-        
-        cursor.execute('DELETE FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
-        add_audit_log(session['user_id'], 'remove_device_tag', f"Removed tag '{tag_name}' from device '{device_name}'", conn=conn)
-        conn.commit()
+        try:
+            remove_tag_from_device(conn, device_id, tag_id, session['user_id'])
+            conn.commit()
+        except ValueError:
+            pass
     return redirect(url_for('device', device_id=device_id))
 
 @app.route('/delete_device', methods=['POST'])
@@ -2248,53 +1847,7 @@ def account_settings():
 @app.route('/account/enable-2fa', methods=['GET', 'POST'])
 @login_required
 def enable_2fa():
-    from flask import current_app
-    import json
-    
-    user_id = session.get('user_id')
-    
-    if request.method == 'POST':
-        action = request.form.get('action')
-        
-        if action == 'generate':
-            secret = generate_totp_secret()
-            session['temp_totp_secret'] = secret
-            with get_db_connection(current_app) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT email FROM User WHERE id = %s', (user_id,))
-                email = cursor.fetchone()[0]
-            
-            totp_uri = get_totp_uri(secret, email)
-            qr_code = generate_qr_code(totp_uri)
-            return render_with_user('enable_2fa.html', secret=secret, qr_code=qr_code, email=email, step='verify')
-        
-        elif action == 'verify':
-            code = request.form.get('code', '').strip()
-            secret = session.get('temp_totp_secret')
-            
-            if not secret:
-                return render_with_user('enable_2fa.html', error='Session expired. Please start over.', step='generate')
-            
-            if verify_totp(secret, code):
-                backup_codes = generate_backup_codes()
-                backup_codes_json = json.dumps(backup_codes)
-                
-                with get_db_connection(current_app) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        UPDATE User 
-                        SET totp_secret = %s, totp_enabled = TRUE, backup_codes = %s, two_fa_setup_complete = TRUE
-                        WHERE id = %s
-                    ''', (secret, backup_codes_json, user_id))
-                
-                session.pop('temp_totp_secret', None)
-                formatted_codes = format_backup_codes(backup_codes)
-                logging.info(f"User {user_id} enabled 2FA.")
-                return render_with_user('enable_2fa.html', backup_codes=formatted_codes, step='backup_codes')
-            else:
-                return render_with_user('enable_2fa.html', error='Invalid code. Please try again.', secret=secret, step='verify')
-    
-    return render_with_user('enable_2fa.html', step='generate')
+    return process_2fa_setup_request(request, session.get('user_id'), 'enable_2fa.html', complete_login=False)
 
 @app.route('/account/disable-2fa', methods=['POST'])
 @login_required
@@ -2646,25 +2199,7 @@ def custom_fields():
                             field_key = re.sub(r'[^a-z0-9_]+', '_', name.lower()).strip('_')
                         
                         # Build validation_rules JSON
-                        validation_rules = {}
-                        if field_type in ['text', 'textarea']:
-                            if request.form.get('min_length'):
-                                validation_rules['min_length'] = int(request.form['min_length'])
-                            if request.form.get('max_length'):
-                                validation_rules['max_length'] = int(request.form['max_length'])
-                            if request.form.get('regex_pattern'):
-                                validation_rules['regex_pattern'] = request.form['regex_pattern']
-                        elif field_type in ['number', 'decimal']:
-                            if request.form.get('min_value'):
-                                validation_rules['min_value'] = float(request.form['min_value'])
-                            if request.form.get('max_value'):
-                                validation_rules['max_value'] = float(request.form['max_value'])
-                        elif field_type == 'select':
-                            options = request.form.get('select_options', '').strip()
-                            if options:
-                                validation_rules['select_options'] = [opt.strip() for opt in options.split(',') if opt.strip()]
-                        
-                        validation_rules_json = json.dumps(validation_rules) if validation_rules else None
+                        validation_rules_json = build_validation_rules_from_form(request.form, field_type)
                         
                         if not name:
                             error = 'Field name is required.'
@@ -2701,25 +2236,7 @@ def custom_fields():
                     searchable = 'searchable' in request.form
                     
                     # Build validation_rules JSON
-                    validation_rules = {}
-                    if field_type in ['text', 'textarea']:
-                        if request.form.get('min_length'):
-                            validation_rules['min_length'] = int(request.form['min_length'])
-                        if request.form.get('max_length'):
-                            validation_rules['max_length'] = int(request.form['max_length'])
-                        if request.form.get('regex_pattern'):
-                            validation_rules['regex_pattern'] = request.form['regex_pattern']
-                    elif field_type in ['number', 'decimal']:
-                        if request.form.get('min_value'):
-                            validation_rules['min_value'] = float(request.form['min_value'])
-                        if request.form.get('max_value'):
-                            validation_rules['max_value'] = float(request.form['max_value'])
-                    elif field_type == 'select':
-                        options = request.form.get('select_options', '').strip()
-                        if options:
-                            validation_rules['select_options'] = [opt.strip() for opt in options.split(',') if opt.strip()]
-                    
-                    validation_rules_json = json.dumps(validation_rules) if validation_rules else None
+                    validation_rules_json = build_validation_rules_from_form(request.form, field_type)
                     
                     if not name:
                         error = 'Field name is required.'
@@ -2769,9 +2286,6 @@ def custom_fields():
                         cursor.execute('UPDATE CustomFieldDefinition SET display_order = %s WHERE id = %s AND entity_type = %s',
                                      (order, field_id, entity_type))
                     conn.commit()
-                    # Redirect to preserve tab state
-                    return redirect(url_for('custom_fields', tab=entity_type))
-                    # Redirect to preserve tab state
                     return redirect(url_for('custom_fields', tab=entity_type))
         
         # Get all custom fields grouped by entity type
@@ -2835,54 +2349,13 @@ def audit():
     PER_PAGE = 25
     page = int(request.args.get('page', 1))
     offset = (page - 1) * PER_PAGE
-    
-    # Get filter parameters
-    user_ids = request.args.getlist('user_ids')  # Multiple users
-    subnet_id = request.args.get('subnet_id')
-    action = request.args.get('action')
-    device_name = request.args.get('device_name')
+    user_ids = request.args.getlist('user_ids')
     date_from = request.args.get('date_from')
     date_to = request.args.get('date_to')
     search_query = request.args.get('search', '').strip()
-    
-    query = '''SELECT AuditLog.id, COALESCE(User.name, 'Deleted User'), AuditLog.action, AuditLog.details, Subnet.name, AuditLog.timestamp FROM AuditLog LEFT JOIN User ON AuditLog.user_id = User.id LEFT JOIN Subnet ON AuditLog.subnet_id = Subnet.id WHERE 1=1'''
-    params = []
-    
-    # Multiple user filtering
-    if user_ids:
-        placeholders = ','.join(['%s'] * len(user_ids))
-        query += f' AND AuditLog.user_id IN ({placeholders})'
-        params.extend(user_ids)
-    
-    if subnet_id:
-        query += ' AND AuditLog.subnet_id = %s'
-        params.append(subnet_id)
-    
-    if action:
-        query += ' AND AuditLog.action = %s'
-        params.append(action)
-    
-    if device_name:
-        query += ' AND AuditLog.details LIKE %s'
-        params.append(f'%{device_name}%')
-    
-    # Date range filtering
-    if date_from:
-        query += ' AND AuditLog.timestamp >= %s'
-        params.append(date_from)
-    
-    if date_to:
-        query += ' AND AuditLog.timestamp <= %s'
-        params.append(date_to + ' 23:59:59')
-    
-    # Search query (searches in details, user name, action, subnet name)
-    if search_query:
-        query += ' AND (AuditLog.details LIKE %s OR COALESCE(User.name, \'\') LIKE %s OR AuditLog.action LIKE %s OR COALESCE(Subnet.name, \'\') LIKE %s)'
-        search_pattern = f'%{search_query}%'
-        params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
-    
+    filter_sql, params = build_audit_filter_clause(request.args)
+    query = '''SELECT AuditLog.id, COALESCE(User.name, 'Deleted User'), AuditLog.action, AuditLog.details, Subnet.name, AuditLog.timestamp FROM AuditLog LEFT JOIN User ON AuditLog.user_id = User.id LEFT JOIN Subnet ON AuditLog.subnet_id = Subnet.id WHERE 1=1''' + filter_sql
     count_query = 'SELECT COUNT(*) FROM (' + query + ') AS count_subquery'
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(buffered=True)
         cursor.execute(count_query, params)
@@ -2898,85 +2371,21 @@ def audit():
         actions = [row[0] for row in cursor.fetchall()]
         cursor.execute('SELECT name FROM Device ORDER BY name')
         devices = cursor.fetchall()
-    query_args = request.args.to_dict()
     total_pages = (total_logs + PER_PAGE - 1) // PER_PAGE
-    return render_with_user('audit.html', logs=logs, users=users, subnets=subnets, actions=actions, devices=devices, page=page, total_pages=total_pages, query_args=query_args, selected_user_ids=user_ids, date_from=date_from, date_to=date_to, search_query=search_query)
+    return render_with_user('audit.html', logs=logs, users=users, subnets=subnets, actions=actions, devices=devices, page=page, total_pages=total_pages, query_args=request.args.to_dict(), selected_user_ids=user_ids, date_from=date_from, date_to=date_to, search_query=search_query)
 
 @app.route('/audit/export_csv')
 @permission_required('view_audit')
 def export_audit_csv():
     """Export audit logs to CSV with current filters applied"""
-    # Get filter parameters (same as audit route)
-    user_ids = request.args.getlist('user_ids')
-    subnet_id = request.args.get('subnet_id')
-    action = request.args.get('action')
-    device_name = request.args.get('device_name')
-    date_from = request.args.get('date_from')
-    date_to = request.args.get('date_to')
-    search_query = request.args.get('search', '').strip()
-    
-    query = '''SELECT COALESCE(User.name, 'Deleted User'), AuditLog.action, AuditLog.details, COALESCE(Subnet.name, 'N/A'), AuditLog.timestamp FROM AuditLog LEFT JOIN User ON AuditLog.user_id = User.id LEFT JOIN Subnet ON AuditLog.subnet_id = Subnet.id WHERE 1=1'''
-    params = []
-    
-    # Apply same filters as audit route
-    if user_ids:
-        placeholders = ','.join(['%s'] * len(user_ids))
-        query += f' AND AuditLog.user_id IN ({placeholders})'
-        params.extend(user_ids)
-    
-    if subnet_id:
-        query += ' AND AuditLog.subnet_id = %s'
-        params.append(subnet_id)
-    
-    if action:
-        query += ' AND AuditLog.action = %s'
-        params.append(action)
-    
-    if device_name:
-        query += ' AND AuditLog.details LIKE %s'
-        params.append(f'%{device_name}%')
-    
-    if date_from:
-        query += ' AND AuditLog.timestamp >= %s'
-        params.append(date_from)
-    
-    if date_to:
-        query += ' AND AuditLog.timestamp <= %s'
-        params.append(date_to + ' 23:59:59')
-    
-    if search_query:
-        query += ' AND (AuditLog.details LIKE %s OR COALESCE(User.name, \'\') LIKE %s OR AuditLog.action LIKE %s OR COALESCE(Subnet.name, \'\') LIKE %s)'
-        search_pattern = f'%{search_query}%'
-        params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
-    
-    query += ' ORDER BY AuditLog.timestamp DESC'
-    
-    with get_db_connection() as conn:
+    filter_sql, params = build_audit_filter_clause(request.args)
+    query = '''SELECT COALESCE(User.name, 'Deleted User'), AuditLog.action, AuditLog.details, COALESCE(Subnet.name, 'N/A'), AuditLog.timestamp FROM AuditLog LEFT JOIN User ON AuditLog.user_id = User.id LEFT JOIN Subnet ON AuditLog.subnet_id = Subnet.id WHERE 1=1''' + filter_sql + ' ORDER BY AuditLog.timestamp DESC'
+    with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         cursor.execute(query, params)
         logs = cursor.fetchall()
-    
-    # Create CSV
-    output = StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['User', 'Action', 'Details', 'Subnet', 'Timestamp'])
-    
-    for log in logs:
-        writer.writerow(log)
-    
-    csv_bytes = output.getvalue().encode('utf-8')
-    output_bytes = BytesIO(csv_bytes)
-    
-    from datetime import datetime
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'audit_logs_{timestamp}.csv'
-    
-    return send_file(
-        output_bytes,
-        mimetype='text/csv',
-        as_attachment=True,
-        download_name=filename
-    )
+    return csv_attachment(logs, ['User', 'Action', 'Details', 'Subnet', 'Timestamp'], f'audit_logs_{timestamp}.csv')
 
 @app.route('/check_update')
 @login_required
@@ -3339,70 +2748,13 @@ def update_ip_notes(ip_id):
 @permission_required('edit_device')
 def update_device_custom_fields(device_id):
     """Update custom field values for a device"""
-    from flask import current_app
+    submitted = request.json if request.is_json else request.form
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        
-        # Get all field definitions for devices
-        cursor.execute('''
-            SELECT id, field_key, field_type, required, validation_rules
-            FROM CustomFieldDefinition
-            WHERE entity_type = 'device'
-        ''')
-        field_defs = {f['field_key']: f for f in cursor.fetchall()}
-        
-        # Get current custom fields
-        cursor.execute('SELECT custom_fields FROM Device WHERE id = %s', (device_id,))
-        result = cursor.fetchone()
-        current_values = {}
-        if result and result.get('custom_fields'):
-            try:
-                current_values = json.loads(result['custom_fields'])
-            except (json.JSONDecodeError, TypeError):
-                current_values = {}
-        
-        # Process submitted values
-        new_values = {}
-        errors = []
-        
-        for field_key, field_def in field_defs.items():
-            submitted_value = request.form.get(f'custom_field_{field_key}', '')
-            
-            # Parse validation rules
-            validation_rules = field_def.get('validation_rules')
-            if isinstance(validation_rules, str):
-                try:
-                    validation_rules = json.loads(validation_rules)
-                except json.JSONDecodeError:
-                    validation_rules = {}
-            elif validation_rules is None:
-                validation_rules = {}
-            field_def['validation_rules'] = validation_rules
-            
-            # Validate value
-            if submitted_value == '' and not field_def.get('required'):
-                # Optional field left empty - remove from values
-                continue
-            
-            is_valid, error_msg = validate_custom_field_value(field_def, submitted_value)
-            if not is_valid:
-                errors.append(error_msg)
-            else:
-                parsed_value = parse_custom_field_value(field_def['field_type'], submitted_value)
-                if parsed_value is not None:
-                    new_values[field_key] = parsed_value
-        
+        errors = update_entity_custom_fields(conn, 'device', device_id, submitted, session['user_id'], request.is_json)
         if errors:
             return jsonify({'error': 'Validation errors', 'errors': errors}), 400
-        
-        # Update custom_fields JSON
-        custom_fields_json = json.dumps(new_values)
-        cursor.execute('UPDATE Device SET custom_fields = %s WHERE id = %s', (custom_fields_json, device_id))
-        add_audit_log(session['user_id'], 'update_device_custom_fields', 
-                     f"Updated custom fields for device {device_id}", conn=conn)
         conn.commit()
-    
-    if request.headers.get('Content-Type') == 'application/json':
+    if request.is_json or request.headers.get('Content-Type') == 'application/json':
         return jsonify({'success': True, 'message': 'Custom fields updated successfully'})
     return redirect(url_for('device', device_id=device_id))
 
@@ -3410,78 +2762,12 @@ def update_device_custom_fields(device_id):
 @permission_required('edit_subnet')
 def update_subnet_custom_fields(subnet_id):
     """Update custom field values for a subnet"""
-    from flask import current_app
+    submitted = request.json if request.is_json else request.form
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        
-        # Get all field definitions for subnets
-        cursor.execute('''
-            SELECT id, field_key, field_type, required, validation_rules
-            FROM CustomFieldDefinition
-            WHERE entity_type = 'subnet'
-        ''')
-        field_defs = {f['field_key']: f for f in cursor.fetchall()}
-        
-        # Get current custom fields
-        cursor.execute('SELECT custom_fields FROM Subnet WHERE id = %s', (subnet_id,))
-        result = cursor.fetchone()
-        current_values = {}
-        if result and result.get('custom_fields'):
-            try:
-                current_values = json.loads(result['custom_fields'])
-            except (json.JSONDecodeError, TypeError):
-                current_values = {}
-        
-        # Process submitted values
-        new_values = {}
-        errors = []
-        
-        # Handle both form data and JSON requests
-        if request.is_json:
-            submitted_data = request.json
-        else:
-            submitted_data = request.form
-        
-        for field_key, field_def in field_defs.items():
-            if request.is_json:
-                submitted_value = submitted_data.get(f'custom_field_{field_key}', '')
-            else:
-                submitted_value = submitted_data.get(f'custom_field_{field_key}', '')
-            
-            # Parse validation rules
-            validation_rules = field_def.get('validation_rules')
-            if isinstance(validation_rules, str):
-                try:
-                    validation_rules = json.loads(validation_rules)
-                except json.JSONDecodeError:
-                    validation_rules = {}
-            elif validation_rules is None:
-                validation_rules = {}
-            field_def['validation_rules'] = validation_rules
-            
-            # Validate value
-            if submitted_value == '' and not field_def.get('required'):
-                # Optional field left empty - remove from values
-                continue
-            
-            is_valid, error_msg = validate_custom_field_value(field_def, submitted_value)
-            if not is_valid:
-                errors.append(error_msg)
-            else:
-                parsed_value = parse_custom_field_value(field_def['field_type'], submitted_value)
-                if parsed_value is not None:
-                    new_values[field_key] = parsed_value
-        
+        errors = update_entity_custom_fields(conn, 'subnet', subnet_id, submitted, session['user_id'], request.is_json)
         if errors:
             return jsonify({'error': 'Validation errors', 'errors': errors}), 400
-        
-        # Update custom_fields JSON
-        custom_fields_json = json.dumps(new_values)
-        cursor.execute('UPDATE Subnet SET custom_fields = %s WHERE id = %s', (custom_fields_json, subnet_id))
-        add_audit_log(session['user_id'], 'update_subnet_custom_fields', 
-                     f"Updated custom fields for subnet {subnet_id}", conn=conn)
         conn.commit()
-    
     if request.is_json or request.headers.get('Content-Type') == 'application/json':
         return jsonify({'success': True, 'message': 'Custom fields updated successfully'})
     return redirect(url_for('subnet', subnet_id=subnet_id))
@@ -3489,106 +2775,49 @@ def update_subnet_custom_fields(subnet_id):
 @app.route('/subnet/<int:subnet_id>/export_csv')
 @permission_required('export_subnet_csv')
 def export_subnet_csv(subnet_id):
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT id, name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
         subnet = cursor.fetchone()
         if not subnet:
             return 'Subnet not found', 404
-        cursor.execute('''
-            SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
-            FROM IPAddress ip
-            LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-            LEFT JOIN Device d ON dia.device_id = d.id
-            WHERE ip.subnet_id = %s
-            ORDER BY INET_ATON(ip.ip)
-        ''', (subnet_id,))
-        ip_addresses_with_device = cursor.fetchall()
-    output = StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['IP Address', 'Hostname', 'Description'])
-    for ip in ip_addresses_with_device:
-        ip_addr = ip[1] or ''
-        hostname = ip[2] or ''
-        device_desc = ip[4] or ''
-        ip_notes = ip[5] if len(ip) > 5 and ip[5] else ''
-        # Combine device description and IP notes
-        combined_desc = ''
-        if device_desc:
-            combined_desc = device_desc
-        if ip_notes:
-            if combined_desc:
-                combined_desc = combined_desc + '\n' + ip_notes
-            else:
-                combined_desc = ip_notes
-        writer.writerow([ip_addr, hostname, combined_desc])
-    csv_bytes = output.getvalue().encode('utf-8')
-    output_bytes = BytesIO(csv_bytes)
-    output_bytes.seek(0)
+        rows = subnet_ip_csv_rows(fetch_subnet_ip_rows(cursor, subnet_id))
     filename = f"{subnet[1]}_{subnet[2]}_subnet.csv".replace(' ', '_')
-    return send_file(
-        output_bytes,
-        mimetype='text/csv',
-        as_attachment=True,
-        download_name=filename
-    )
+    return csv_attachment(rows, ['IP Address', 'Hostname', 'Description'], filename)
 
 @app.route('/subnet/<int:subnet_id>/dhcp', methods=['GET', 'POST'])
 @permission_required('view_dhcp')
 def dhcp_pool(subnet_id):
     error = None
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT id, name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
         subnet = cursor.fetchone()
         dhcp_pool = None
-        cursor.execute('''SELECT start_ip, end_ip, excluded_ips FROM DHCPPool WHERE subnet_id = %s''', (subnet_id,))
+        cursor.execute('SELECT start_ip, end_ip, excluded_ips FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
         row = cursor.fetchone()
         if row:
             dhcp_pool = {'start_ip': row[0], 'end_ip': row[1], 'excluded_ips': row[2] if len(row) > 2 else ''}
         if request.method == 'POST':
             if not has_permission('configure_dhcp', conn=conn):
                 error = 'You do not have permission to configure DHCP pools.'
+            elif 'remove' in request.form:
+                remove_dhcp_pool(cursor, subnet_id, subnet[1], subnet[2], session['user_id'], conn)
+                conn.commit()
+                dhcp_pool = None
             else:
-                user_name = get_current_user_name()
-                if 'remove' in request.form:
-                    cursor.execute('DELETE FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
-                    cursor.execute('UPDATE IPAddress SET hostname=NULL WHERE subnet_id=%s AND hostname="DHCP"', (subnet_id,))
+                cursor.execute('SELECT id FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
+                is_update = cursor.fetchone() is not None
+                try:
+                    dhcp_pool = configure_dhcp_pool(
+                        cursor, subnet_id,
+                        request.form['start_ip'], request.form['end_ip'],
+                        request.form.get('excluded_ips', ''),
+                        subnet[1], subnet[2], session['user_id'], conn, is_update,
+                    )
                     conn.commit()
-                    dhcp_pool = None
-                    add_audit_log(session['user_id'], 'dhcp_pool_remove', f"Removed DHCP pool for subnet {subnet[1]} ({subnet[2]})", subnet_id, conn=conn)
-                else:
-                    start_ip = request.form['start_ip']
-                    end_ip = request.form['end_ip']
-                    excluded_ips = request.form.get('excluded_ips', '').replace(' ', '')
-                    excluded_list = [ip for ip in excluded_ips.split(',') if ip]
-                    cursor.execute('SELECT ip FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-                    all_ips = [row[0] for row in cursor.fetchall()]
-                    if start_ip not in all_ips or end_ip not in all_ips:
-                        error = 'Start and End IP must be within the subnet.'
-                    else:
-                        cursor.execute('UPDATE IPAddress SET hostname=NULL WHERE subnet_id=%s AND hostname="DHCP"', (subnet_id,))
-                        if dhcp_pool:
-                            cursor.execute('''UPDATE DHCPPool SET start_ip = %s, end_ip = %s, excluded_ips = %s WHERE subnet_id = %s''', (start_ip, end_ip, excluded_ips, subnet_id))
-                            action = 'dhcp_pool_update'
-                            details = f"Updated DHCP pool for subnet {subnet[1]} ({subnet[2]}): {start_ip} - {end_ip}, excluded: {excluded_ips}"
-                        else:
-                            cursor.execute('''INSERT INTO DHCPPool (subnet_id, start_ip, end_ip, excluded_ips) VALUES (%s, %s, %s, %s)''', (subnet_id, start_ip, end_ip, excluded_ips))
-                            action = 'dhcp_pool_create'
-                            details = f"Created DHCP pool for subnet {subnet[1]} ({subnet[2]}): {start_ip} - {end_ip}, excluded: {excluded_ips}"
-                        in_range = False
-                        for ip in all_ips:
-                            if ip == start_ip:
-                                in_range = True
-                            if in_range and ip not in excluded_list:
-                                cursor.execute('UPDATE IPAddress SET hostname="DHCP" WHERE subnet_id=%s AND ip=%s', (subnet_id, ip))
-                            if ip == end_ip:
-                                break
-                        conn.commit()
-                        dhcp_pool = {'start_ip': start_ip, 'end_ip': end_ip, 'excluded_ips': excluded_ips}
-                        add_audit_log(session['user_id'], action, details, subnet_id, conn=conn)
+                except ValueError as exc:
+                    error = str(exc)
         return render_with_user('dhcp.html', subnet={'id': subnet[0], 'name': subnet[1]}, dhcp_pool=dhcp_pool, error=error)
 
 @app.route('/device_type_stats')
@@ -3784,42 +3013,11 @@ def add_rack():
 @app.route('/rack/<int:rack_id>')
 @permission_required('view_rack')
 def rack(rack_id):
-    from flask import current_app, request
     side = request.args.get('side', 'front')
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
         if not is_feature_enabled('racks', conn=conn):
             abort(404)
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT * FROM Rack WHERE id = %s', (rack_id,))
-        rack = cursor.fetchone()
-        if not rack:
-            return 'Rack not found', 404
-        cursor.execute('SELECT * FROM RackDevice WHERE rack_id = %s', (rack_id,))
-        rack_devices = cursor.fetchall()
-        device_ids = [rd['device_id'] for rd in rack_devices if rd['device_id']]
-        device_names = {}
-        if device_ids:
-            format_strings = ','.join(['%s'] * len(device_ids))
-            cursor.execute(f'SELECT id, name FROM Device WHERE id IN ({format_strings})', tuple(device_ids))
-            for row in cursor.fetchall():
-                device_names[row['id']] = row['name']
-        for rd in rack_devices:
-            if rd['device_id']:
-                rd['device_name'] = device_names.get(rd['device_id'], 'Unknown')
-            else:
-                rd['device_name'] = rd['nonnet_device_name']
-        cursor.execute('''
-            SELECT DISTINCT Device.id, Device.name, Device.device_type_id, Device.description
-            FROM Device
-            JOIN DeviceIPAddress ON Device.id = DeviceIPAddress.device_id
-            JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id
-            JOIN Subnet ON IPAddress.subnet_id = Subnet.id
-            WHERE Device.device_type_id NOT IN (2, 6)
-              AND Subnet.site = %s
-        ''', (rack['site'],))
-        site_devices = cursor.fetchall()
-    return render_with_user('rack.html', rack=rack, rack_devices=rack_devices, site_devices=site_devices, current_side=side)
+        return render_rack_page(conn, rack_id, side)
 
 @app.route('/rack/<int:rack_id>/add_device', methods=['POST'])
 @permission_required('add_device_to_rack')
@@ -3828,58 +3026,29 @@ def rack_add_device(rack_id):
     position_u = int(request.form['position_u'])
     side = request.form['side']
     user_name = get_current_user_name()
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
         if not is_feature_enabled('racks', conn=conn):
             abort(404)
         cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT height_u FROM Rack WHERE id = %s', (rack_id,))
-        rack = cursor.fetchone()
-        if not rack:
-            return 'Rack not found', 404
-        if position_u < 1 or position_u > rack['height_u']:
-            cursor.execute('SELECT * FROM RackDevice WHERE rack_id = %s', (rack_id,))
-            rack_devices = cursor.fetchall()
-            device_ids = [rd['device_id'] for rd in rack_devices]
-            device_names = {}
-            if device_ids:
-                format_strings = ','.join(['%s'] * len(device_ids))
-                cursor.execute(f'SELECT id, name FROM Device WHERE id IN ({format_strings})', tuple(device_ids))
-                for row in cursor.fetchall():
-                    device_names[row['id']] = row['name']
-            for rd in rack_devices:
-                rd['device_name'] = device_names.get(rd['device_id'], 'Unknown')
-            cursor.execute('SELECT id, name, device_type_id FROM Device')
-            all_devices = cursor.fetchall()
-            site_devices = [d for d in all_devices if d['device_type_id'] not in (2, 6)]
-            error = f"Invalid U position: {position_u}. Rack is {rack['height_u']}U tall."
-            return render_with_user('rack.html', rack=rack, rack_devices=rack_devices, site_devices=site_devices, current_side=side, error=error)
-        cursor.execute('SELECT COUNT(*) FROM RackDevice WHERE rack_id = %s AND position_u = %s AND side = %s', (rack_id, position_u, side))
-        if cursor.fetchone()['COUNT(*)'] > 0:
-            cursor.execute('SELECT * FROM RackDevice WHERE rack_id = %s', (rack_id,))
-            rack_devices = cursor.fetchall()
-            device_ids = [rd['device_id'] for rd in rack_devices]
-            device_names = {}
-            if device_ids:
-                format_strings = ','.join(['%s'] * len(device_ids))
-                cursor.execute(f'SELECT id, name FROM Device WHERE id IN ({format_strings})', tuple(device_ids))
-                for row in cursor.fetchall():
-                    device_names[row['id']] = row['name']
-            for rd in rack_devices:
-                rd['device_name'] = device_names.get(rd['device_id'], 'Unknown')
-            cursor.execute('SELECT id, name, device_type_id FROM Device')
-            all_devices = cursor.fetchall()
-            site_devices = [d for d in all_devices if d['device_type_id'] not in (2, 6)]
-            error = f"U{position_u} on the {side} is already occupied."
-            return render_with_user('rack.html', rack=rack, rack_devices=rack_devices, site_devices=site_devices, current_side=side, error=error)
-        cursor.execute('INSERT INTO RackDevice (rack_id, device_id, position_u, side) VALUES (%s, %s, %s, %s)', (rack_id, device_id, position_u, side))
-        cursor2 = conn.cursor()
-        cursor2.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-        device_name = cursor2.fetchone()
-        cursor2.execute('SELECT name FROM Rack WHERE id = %s', (rack_id,))
-        rack_name = cursor2.fetchone()
-        add_audit_log(session['user_id'], 'rack_add_device', f"Assigned device '{device_name[0] if device_name else device_id}' to rack '{rack_name[0] if rack_name else rack_id}' U{position_u} ({side})", conn=conn)
+        _, placement_error = check_rack_placement(cursor, rack_id, position_u, side)
+        if placement_error == 'Rack not found':
+            return placement_error, 404
+        if placement_error:
+            return render_rack_page(conn, rack_id, side, error=placement_error)
+        cursor.execute(
+            'INSERT INTO RackDevice (rack_id, device_id, position_u, side) VALUES (%s, %s, %s, %s)',
+            (rack_id, device_id, position_u, side),
+        )
+        cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
+        device_name = cursor.fetchone()
+        cursor.execute('SELECT name FROM Rack WHERE id = %s', (rack_id,))
+        rack_name = cursor.fetchone()
+        add_audit_log(
+            session['user_id'], 'rack_add_device',
+            f"Assigned device '{device_name['name'] if device_name else device_id}' to rack "
+            f"'{rack_name['name'] if rack_name else rack_id}' U{position_u} ({side})",
+            conn=conn,
+        )
         conn.commit()
     logging.info(f"User {user_name} assigned device {device_id} to rack {rack_id} at U{position_u} ({side}).")
     return redirect(url_for('rack', rack_id=rack_id))
@@ -3891,57 +3060,24 @@ def rack_add_nonnet_device(rack_id):
     position_u = int(request.form['position_u'])
     side = request.form['side']
     user_name = get_current_user_name()
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if racks feature is enabled
         if not is_feature_enabled('racks', conn=conn):
             abort(404)
         cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT height_u FROM Rack WHERE id = %s', (rack_id,))
-        rack = cursor.fetchone()
-        if not rack:
-            return 'Rack not found', 404
-        if position_u < 1 or position_u > rack['height_u']:
-            error = f"Invalid U position: {position_u}. Rack is {rack['height_u']}U tall."
-            cursor.execute('SELECT * FROM RackDevice WHERE rack_id = %s', (rack_id,))
-            rack_devices = cursor.fetchall()
-            device_ids = [rd['device_id'] for rd in rack_devices if rd['device_id']]
-            device_names = {}
-            if device_ids:
-                format_strings = ','.join(['%s'] * len(device_ids))
-                cursor.execute(f'SELECT id, name FROM Device WHERE id IN ({format_strings})', tuple(device_ids))
-                for row in cursor.fetchall():
-                    device_names[row['id']] = row['name']
-            for rd in rack_devices:
-                if rd['device_id']:
-                    rd['device_name'] = device_names.get(rd['device_id'], 'Unknown')
-                else:
-                    rd['device_name'] = rd['nonnet_device_name']
-            cursor.execute('SELECT id, name, device_type_id FROM Device WHERE device_type_id NOT IN (2, 6)')
-            site_devices = cursor.fetchall()
-            return render_with_user('rack.html', rack=rack, rack_devices=rack_devices, site_devices=site_devices, current_side=side, error=error)
-        cursor.execute('SELECT COUNT(*) FROM RackDevice WHERE rack_id = %s AND position_u = %s AND side = %s', (rack_id, position_u, side))
-        if cursor.fetchone()['COUNT(*)'] > 0:
-            error = f"U{position_u} on the {side} is already occupied."
-            cursor.execute('SELECT * FROM RackDevice WHERE rack_id = %s', (rack_id,))
-            rack_devices = cursor.fetchall()
-            device_ids = [rd['device_id'] for rd in rack_devices if rd['device_id']]
-            device_names = {}
-            if device_ids:
-                format_strings = ','.join(['%s'] * len(device_ids))
-                cursor.execute(f'SELECT id, name FROM Device WHERE id IN ({format_strings})', tuple(device_ids))
-                for row in cursor.fetchall():
-                    device_names[row['id']] = row['name']
-            for rd in rack_devices:
-                if rd['device_id']:
-                    rd['device_name'] = device_names.get(rd['device_id'], 'Unknown')
-                else:
-                    rd['device_name'] = rd['nonnet_device_name']
-            cursor.execute('SELECT id, name, device_type_id FROM Device WHERE device_type_id NOT IN (2, 6)')
-            site_devices = cursor.fetchall()
-            return render_with_user('rack.html', rack=rack, rack_devices=rack_devices, site_devices=site_devices, current_side=side, error=error)
-        cursor.execute('INSERT INTO RackDevice (rack_id, device_id, position_u, side, nonnet_device_name) VALUES (%s, NULL, %s, %s, %s)', (rack_id, position_u, side, device_name))
-        add_audit_log(session['user_id'], 'rack_add_nonnet_device', f"Added non-networked device '{device_name}' to rack '{rack_id}' U{position_u} ({side})", conn=conn)
+        _, placement_error = check_rack_placement(cursor, rack_id, position_u, side)
+        if placement_error == 'Rack not found':
+            return placement_error, 404
+        if placement_error:
+            return render_rack_page(conn, rack_id, side, error=placement_error)
+        cursor.execute(
+            'INSERT INTO RackDevice (rack_id, device_id, position_u, side, nonnet_device_name) VALUES (%s, NULL, %s, %s, %s)',
+            (rack_id, position_u, side, device_name),
+        )
+        add_audit_log(
+            session['user_id'], 'rack_add_nonnet_device',
+            f"Added non-networked device '{device_name}' to rack '{rack_id}' U{position_u} ({side})",
+            conn=conn,
+        )
         conn.commit()
     logging.info(f"User {user_name} added non-networked device '{device_name}' to rack {rack_id} at U{position_u} ({side}).")
     return redirect(url_for('rack', rack_id=rack_id))
@@ -4487,23 +3623,16 @@ def api_add_subnet():
         vlan_id = None
     
     try:
-        network = ip_network(cidr, strict=False)
-        if network.prefixlen < 24:
-            return jsonify({'error': 'Subnet must be /24 or smaller'}), 400
+        with get_db_connection(current_app) as conn:
+            subnet_id = create_subnet_from_cidr(
+                conn, name, cidr, site, vlan_id, vlan_description, vlan_notes, request.api_user['id'],
+            )
+            conn.commit()
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     except Exception:
         return jsonify({'error': 'Invalid CIDR format'}), 400
     
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO Subnet (name, cidr, site, vlan_id, vlan_description, vlan_notes) VALUES (%s, %s, %s, %s, %s, %s)', 
-                      (name, cidr, site, vlan_id, vlan_description if vlan_description else None, vlan_notes if vlan_notes else None))
-        subnet_id = cursor.lastrowid
-        ip_rows = [(str(ip), subnet_id) for ip in network.hosts()]
-        cursor.executemany('INSERT INTO IPAddress (ip, subnet_id) VALUES (%s, %s)', ip_rows)
-        vlan_info = f" (VLAN {vlan_id})" if vlan_id else ""
-        add_audit_log(request.api_user['id'], 'add_subnet', f"Added subnet {name} ({cidr}){vlan_info}", subnet_id, conn=conn)
-        conn.commit()
     return jsonify({
         'id': subnet_id, 
         'name': name, 
@@ -5027,7 +4156,6 @@ def api_configure_dhcp(subnet_id):
     if not data:
         return jsonify({'error': 'Request body is required'}), 400
     
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
@@ -5037,15 +4165,7 @@ def api_configure_dhcp(subnet_id):
         subnet_name, subnet_cidr = subnet
         
         if data.get('remove'):
-            cursor.execute('DELETE FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
-            cursor.execute('UPDATE IPAddress SET hostname = NULL WHERE subnet_id = %s AND hostname = %s', (subnet_id, 'DHCP'))
-            add_audit_log(
-                request.api_user['id'],
-                'dhcp_pool_remove',
-                f"Removed DHCP pool for subnet {subnet_name} ({subnet_cidr})",
-                subnet_id,
-                conn=conn
-            )
+            remove_dhcp_pool(cursor, subnet_id, subnet_name, subnet_cidr, request.api_user['id'], conn)
             conn.commit()
             return jsonify({'message': 'DHCP pool removed successfully'})
         
@@ -5063,41 +4183,20 @@ def api_configure_dhcp(subnet_id):
         excluded_list = [ip.strip() for ip in excluded_ips if ip.strip()]
         excluded_str = ','.join(excluded_list)
         
-        cursor.execute('SELECT ip FROM IPAddress WHERE subnet_id = %s ORDER BY ip', (subnet_id,))
-        all_ips = [row[0] for row in cursor.fetchall()]
-        if start_ip not in all_ips or end_ip not in all_ips:
-            return jsonify({'error': 'start_ip and end_ip must be addresses within the subnet'}), 400
-        
         cursor.execute('SELECT id FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
-        existing = cursor.fetchone()
-        cursor.execute('UPDATE IPAddress SET hostname = NULL WHERE subnet_id = %s AND hostname = %s', (subnet_id, 'DHCP'))
-        if existing:
-            cursor.execute(
-                'UPDATE DHCPPool SET start_ip = %s, end_ip = %s, excluded_ips = %s WHERE subnet_id = %s',
-                (start_ip, end_ip, excluded_str, subnet_id)
+        is_update = cursor.fetchone() is not None
+        try:
+            result = configure_dhcp_pool(
+                cursor, subnet_id, start_ip, end_ip, excluded_str,
+                subnet_name, subnet_cidr, request.api_user['id'], conn, is_update,
             )
-            action = 'dhcp_pool_update'
-            details = f"Updated DHCP pool for subnet {subnet_name} ({subnet_cidr}): {start_ip} - {end_ip}, excluded: {excluded_str}"
-        else:
-            cursor.execute(
-                'INSERT INTO DHCPPool (subnet_id, start_ip, end_ip, excluded_ips) VALUES (%s, %s, %s, %s)',
-                (subnet_id, start_ip, end_ip, excluded_str)
-            )
-            action = 'dhcp_pool_create'
-            details = f"Created DHCP pool for subnet {subnet_name} ({subnet_cidr}): {start_ip} - {end_ip}, excluded: {excluded_str}"
-        
-        in_range = False
-        for candidate_ip in all_ips:
-            if candidate_ip == start_ip:
-                in_range = True
-            if in_range and candidate_ip not in excluded_list:
-                cursor.execute('UPDATE IPAddress SET hostname = %s WHERE subnet_id = %s AND ip = %s', ('DHCP', subnet_id, candidate_ip))
-            if candidate_ip == end_ip:
-                break
-        
-        add_audit_log(request.api_user['id'], action, details, subnet_id, conn=conn)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
         conn.commit()
-    return jsonify({'message': 'DHCP pools configured successfully', 'pool': {'start_ip': start_ip, 'end_ip': end_ip, 'excluded_ips': excluded_list}})
+    return jsonify({
+        'message': 'DHCP pools configured successfully',
+        'pool': {'start_ip': result['start_ip'], 'end_ip': result['end_ip'], 'excluded_ips': excluded_list},
+    })
 
 # Tags API
 @app.route('/api/v1/tags', methods=['GET'])
@@ -5273,9 +4372,7 @@ def api_device_tags(device_id):
 @api_permission_required('assign_device_tag')
 def api_assign_device_tag(device_id):
     """Assign a tag to a device"""
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
         if not is_feature_enabled('device_tags', conn=conn):
             return jsonify({'error': 'Device tags feature is disabled'}), 404
     data = request.get_json()
@@ -5283,59 +4380,36 @@ def api_assign_device_tag(device_id):
         return jsonify({'error': 'tag_id is required'}), 400
     
     tag_id = data['tag_id']
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-        device = cursor.fetchone()
-        if not device:
-            return jsonify({'error': 'Device not found'}), 404
-        device_name = device[0]
-        
-        cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
-        tag = cursor.fetchone()
-        if not tag:
-            return jsonify({'error': 'Tag not found'}), 404
-        tag_name = tag[0]
-        
-        cursor.execute('SELECT id FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
-        if cursor.fetchone():
-            return jsonify({'error': 'Tag already assigned to device'}), 400
-        
-        cursor.execute('INSERT INTO DeviceTag (device_id, tag_id) VALUES (%s, %s)', (device_id, tag_id))
-        add_audit_log(request.api_user['id'], 'assign_device_tag', f"Assigned tag '{tag_name}' to device '{device_name}'", conn=conn)
-        conn.commit()
+        try:
+            assign_tag_to_device(conn, device_id, tag_id, request.api_user['id'])
+            conn.commit()
+        except ValueError as exc:
+            msg = str(exc)
+            if 'not found' in msg.lower():
+                return jsonify({'error': msg}), 404
+            if 'already assigned' in msg.lower():
+                return jsonify({'error': 'Tag already assigned to device'}), 400
+            return jsonify({'error': msg}), 400
     return jsonify({'message': 'Tag assigned successfully'})
 
 @app.route('/api/v1/devices/<int:device_id>/tags/<int:tag_id>', methods=['DELETE'])
 @api_permission_required('remove_device_tag')
 def api_remove_device_tag(device_id, tag_id):
     """Remove a tag from a device"""
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if device tags feature is enabled
         if not is_feature_enabled('device_tags', conn=conn):
             return jsonify({'error': 'Device tags feature is disabled'}), 404
-        cursor = conn.cursor()
-        cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-        device = cursor.fetchone()
-        if not device:
-            return jsonify({'error': 'Device not found'}), 404
-        device_name = device[0]
-        
-        cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
-        tag = cursor.fetchone()
-        if not tag:
-            return jsonify({'error': 'Tag not found'}), 404
-        tag_name = tag[0]
-        
-        cursor.execute('SELECT id FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
-        if not cursor.fetchone():
-            return jsonify({'error': 'Tag not assigned to device'}), 404
-        
-        cursor.execute('DELETE FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
-        add_audit_log(request.api_user['id'], 'remove_device_tag', f"Removed tag '{tag_name}' from device '{device_name}'", conn=conn)
-        conn.commit()
+        try:
+            remove_tag_from_device(conn, device_id, tag_id, request.api_user['id'])
+            conn.commit()
+        except ValueError as exc:
+            msg = str(exc)
+            if 'not found' in msg.lower():
+                return jsonify({'error': msg}), 404
+            if 'not assigned' in msg.lower():
+                return jsonify({'error': 'Tag not assigned to device'}), 404
+            return jsonify({'error': msg}), 400
     return jsonify({'message': 'Tag removed successfully'})
 
 @app.route('/api/v1/devices/by-tag/<tag_identifier>', methods=['GET'])
@@ -5661,13 +4735,10 @@ def bulk_assign_tags():
 @app.route('/bulk/export_subnets', methods=['POST'])
 @permission_required('export_subnet_csv')
 def bulk_export_subnets():
-    from flask import current_app
     with get_db_connection(current_app) as conn:
-        # Check if bulk operations feature is enabled
         if not is_feature_enabled('bulk_operations', conn=conn):
             abort(404)
     subnet_ids = request.form.getlist('subnet_ids[]')
-    from flask import current_app
     output = StringIO()
     writer = csv.writer(output)
     
@@ -5678,32 +4749,18 @@ def bulk_export_subnets():
             subnet = cursor.fetchone()
             if not subnet:
                 continue
-            
             writer.writerow([f"Subnet: {subnet[1]} ({subnet[2]})"])
             writer.writerow(['IP Address', 'Hostname', 'Description'])
-            
-            cursor.execute('''
-                SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
-                FROM IPAddress ip
-                LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-                LEFT JOIN Device d ON dia.device_id = d.id
-                WHERE ip.subnet_id = %s
-                ORDER BY INET_ATON(ip.ip)
-            ''', (subnet_id,))
-            ip_addresses = cursor.fetchall()
-            
-            for ip in ip_addresses:
-                hostname = ip[2]
-                device_description = ip[4] if len(ip) > 4 else None
-                writer.writerow([ip[1] or '', hostname or '', device_description or ''])
-            
-            writer.writerow([])  # Empty row between subnets
+            writer.writerows(subnet_ip_csv_rows(fetch_subnet_ip_rows(cursor, subnet_id)))
+            writer.writerow([])
     
     output.seek(0)
-    return send_file(BytesIO(output.getvalue().encode('utf-8')), 
-                    mimetype='text/csv',
-                    as_attachment=True,
-                    download_name='bulk_subnet_export.csv')
+    return send_file(
+        BytesIO(output.getvalue().encode('utf-8')),
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name='bulk_subnet_export.csv',
+    )
 
 # API key regeneration route
 @app.route('/regenerate_api_key', methods=['POST'])
