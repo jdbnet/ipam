@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
-import { Menu, Search, X, Home, Server, Grid3x3, Settings, Users, Tag, Layers, FileText, User } from "lucide-vue-next";
+import { Menu, Search, X, Home, Server, Grid3x3, Settings, Users, Tag, Layers, FileText, User, Network } from "lucide-vue-next";
 import { useAuthStore } from "@/stores/auth";
 import { api } from "@/api";
 
@@ -18,6 +18,7 @@ const searchLoading = ref(false);
 const nav = computed(() =>
   [
     { to: "/", label: "Home", icon: Home, perm: "view_index" },
+    { to: "/subnets", label: "Subnets", icon: Network, perm: "view_subnet", match: (path: string) => path === "/subnets" || /^\/subnets\/\d+/.test(path) },
     { to: "/devices", label: "Devices", icon: Server, perm: "view_devices" },
     { to: "/racks", label: "Racks", icon: Grid3x3, perm: "view_racks" },
     { to: "/tags", label: "Tags", icon: Tag, perm: "view_tags" },
@@ -112,7 +113,7 @@ onUnmounted(() => {
           :key="item.to"
           :to="item.to"
           class="mb-0.5 flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition"
-          :class="route.path === item.to || route.path.startsWith(item.to + '/')
+          :class="(item.match ? item.match(route.path) : route.path === item.to || route.path.startsWith(item.to + '/'))
             ? 'bg-accent/15 text-accent font-medium'
             : 'text-slate-600 hover:bg-surface-overlay dark:text-slate-400'"
           @click="sidebarOpen = false"

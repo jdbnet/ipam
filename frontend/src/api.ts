@@ -178,7 +178,28 @@ export const api = {
     return handle(await fetchApi("/api/v2/auth/logout", { method: "POST" }));
   },
   async dashboard() {
-    return handle<{ sites: Record<string, Subnet[]> }>(await fetchApi("/api/v2/dashboard"));
+    return handle<{
+      stats: {
+        total_ips: number;
+        used_ips: number;
+        available_ips: number;
+        utilization_percent: number;
+        subnet_count: number;
+        alerting_subnets: number;
+        device_count: number;
+      };
+      subnet_overview: {
+        id: number;
+        name: string;
+        cidr: string;
+        site: string;
+        vlan_id?: number;
+        utilization: number;
+        available: number;
+        status: "active" | "alerting";
+      }[];
+      activity: { hour: number; count: number }[];
+    }>(await fetchApi("/api/v2/dashboard"));
   },
   async search(q: string) {
     return handle<Record<string, unknown[]>>(await fetchApi(`/api/v2/search?q=${encodeURIComponent(q)}`));

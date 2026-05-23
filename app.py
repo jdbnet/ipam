@@ -2718,18 +2718,57 @@ def api_roles():
 def api_dashboard():
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet ORDER BY site, name')
-        subnets = cursor.fetchall()
         utils = get_all_subnet_utilizations(cursor)
-        sites = {}
-        for s in subnets:
-            site = s['site'] or 'Unassigned'
-            util = utils.get(s['id'], {'percent': 0})
-            sites.setdefault(site, []).append({
-                'id': s['id'], 'name': s['name'], 'cidr': s['cidr'],
-                'vlan_id': s['vlan_id'], 'utilization': util['percent'],
+        cursor.execute('SELECT COUNT(*) AS n FROM Device')
+        device_count = cursor.fetchone()['n']
+        cursor.execute('SELECT COUNT(*) AS n FROM Subnet')
+        subnet_count = cursor.fetchone()['n']
+
+        total_ips = sum(u['total'] for u in utils.values())
+        used_ips = sum(u['used'] for u in utils.values())
+        available_ips = max(total_ips - used_ips, 0)
+        utilization_percent = round((used_ips / total_ips * 100) if total_ips > 0 else 0, 1)
+        alerting_subnets = sum(1 for u in utils.values() if u['percent'] >= 90)
+
+        cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet ORDER BY name')
+        subnet_overview = []
+        for s in cursor.fetchall():
+            u = utils.get(s['id'], {'total': 0, 'used': 0, 'percent': 0})
+            pct = u['percent']
+            subnet_overview.append({
+                'id': s['id'],
+                'name': s['name'],
+                'cidr': s['cidr'],
+                'site': s['site'] or 'Unassigned',
+                'vlan_id': s['vlan_id'],
+                'utilization': pct,
+                'available': u['total'] - u['used'],
+                'status': 'alerting' if pct >= 90 else 'active',
             })
-    return jsonify({'sites': sites})
+
+        cursor.execute('''
+            SELECT HOUR(timestamp) AS hour, COUNT(*) AS count
+            FROM AuditLog
+            WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+            GROUP BY HOUR(timestamp)
+            ORDER BY hour
+        ''')
+        activity_by_hour = {row['hour']: row['count'] for row in cursor.fetchall()}
+        activity = [{'hour': h, 'count': activity_by_hour.get(h, 0)} for h in range(24)]
+
+    return jsonify({
+        'stats': {
+            'total_ips': total_ips,
+            'used_ips': used_ips,
+            'available_ips': available_ips,
+            'utilization_percent': utilization_percent,
+            'subnet_count': subnet_count,
+            'alerting_subnets': alerting_subnets,
+            'device_count': device_count,
+        },
+        'subnet_overview': subnet_overview,
+        'activity': activity,
+    })
 
 
 @app.route('/api/v2/search', methods=['GET'])

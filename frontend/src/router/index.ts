@@ -12,6 +12,7 @@ const router = createRouter({
       component: () => import("@/components/AppLayout.vue"),
       children: [
         { path: "", name: "dashboard", component: () => import("@/views/DashboardView.vue") },
+        { path: "subnets", name: "subnets", component: () => import("@/views/SubnetsBrowseView.vue") },
         { path: "devices", name: "devices", component: () => import("@/views/DevicesView.vue") },
         { path: "devices/:id", name: "device", component: () => import("@/views/DeviceDetailView.vue") },
         { path: "subnets/:id", name: "subnet", component: () => import("@/views/SubnetDetailView.vue") },
