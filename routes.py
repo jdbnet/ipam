@@ -12,7 +12,6 @@ import subprocess
 import shutil
 from datetime import datetime
 from werkzeug.utils import secure_filename
-from cache import cache
 import json
 import re
 from ipaddress import ip_address, IPv4Address, IPv6Address
@@ -198,10 +197,6 @@ def add_audit_log(user_id, action, details=None, subnet_id=None, conn=None):
         conn.commit()
         conn.close()
 
-def invalidate_cache_for_device(device_id):
-    """Invalidate all cache entries related to a device"""
-    cache.invalidate_device(device_id)
-    cache.clear('devices')
 
 def get_ip_history_from_audit_logs(device_id=None, ip_address=None, conn=None):
     """
@@ -296,11 +291,6 @@ def get_ip_history_from_audit_logs(device_id=None, ip_address=None, conn=None):
         if close_conn:
             conn.close()
 
-def invalidate_cache_for_subnet(subnet_id):
-    """Invalidate all cache entries related to a subnet"""
-    cache.invalidate_subnet(subnet_id)
-    cache.clear('index')
-    cache.clear('admin')
 
 def validate_custom_field_value(field_def, value):
     """
@@ -520,267 +510,9 @@ def get_custom_fields_for_entity(entity_type, entity_id, conn=None):
         if close_conn:
             conn.close()
 
-def prewarm_cache(app):
-    """Pre-warm cache in background by loading all data"""
-    import threading
-    import time
-    
-    def _prewarm():
-        """Background function to pre-warm cache"""
-        # Wait a bit for app to fully initialize
-        time.sleep(2)
-        
-        try:
-            with app.app_context():
-                from flask import current_app
-                conn = get_db_connection(current_app)
-                try:
-                    cursor = conn.cursor()
-                    
-                    # Pre-warm index page (all subnets with utilization)
-                    logging.info("Pre-warming cache: Loading all subnets for index page...")
-                    cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet')
-                    subnets = cursor.fetchall()
-                    sites_subnets = {}
-                    for subnet in subnets:
-                        site = subnet[3] or 'Unassigned'
-                        if site not in sites_subnets:
-                            sites_subnets[site] = []
-                        
-                        subnet_id = subnet[0]
-                        cursor.execute('SELECT COUNT(*) FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-                        total_ips = cursor.fetchone()[0]
-                        
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM IPAddress ip
-                            WHERE ip.subnet_id = %s AND ip.id IN (SELECT ip_id FROM DeviceIPAddress)
-                        ''', (subnet_id,))
-                        assigned_ips = cursor.fetchone()[0]
-                        
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM IPAddress ip
-                            WHERE ip.subnet_id = %s AND ip.hostname = 'DHCP' AND ip.id NOT IN (SELECT ip_id FROM DeviceIPAddress)
-                        ''', (subnet_id,))
-                        dhcp_ips = cursor.fetchone()[0]
-                        
-                        used_ips = assigned_ips + dhcp_ips
-                        utilization_percent = (used_ips / total_ips * 100) if total_ips > 0 else 0
-                        
-                        sites_subnets[site].append({
-                            'id': subnet[0],
-                            'name': subnet[1],
-                            'cidr': subnet[2],
-                            'vlan_id': subnet[4],
-                            'utilization': round(utilization_percent, 1)
-                        })
-                    cache.set('index', sites_subnets, ttl=10800)
-                    logging.info(f"Pre-warmed index cache with {len(subnets)} subnets")
-                    
-                    # Pre-warm admin page
-                    logging.info("Pre-warming cache: Loading admin page data...")
-                    cursor.execute('SELECT id, name, cidr, site FROM Subnet ORDER BY site, name')
-                    subnet_rows = cursor.fetchall()
-                    admin_subnets = []
-                    for row in subnet_rows:
-                        subnet_id = row[0]
-                        cursor.execute('SELECT COUNT(*) FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-                        total_ips = cursor.fetchone()[0]
-                        
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM IPAddress ip
-                            WHERE ip.subnet_id = %s AND ip.id IN (SELECT ip_id FROM DeviceIPAddress)
-                        ''', (subnet_id,))
-                        assigned_ips = cursor.fetchone()[0]
-                        
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM IPAddress ip
-                            WHERE ip.subnet_id = %s AND ip.hostname = 'DHCP' AND ip.id NOT IN (SELECT ip_id FROM DeviceIPAddress)
-                        ''', (subnet_id,))
-                        dhcp_ips = cursor.fetchone()[0]
-                        
-                        available_ips = total_ips - assigned_ips - dhcp_ips
-                        used_ips = assigned_ips + dhcp_ips
-                        utilization_percent = (used_ips / total_ips * 100) if total_ips > 0 else 0
-                        
-                        admin_subnets.append({
-                            'id': row[0],
-                            'name': row[1],
-                            'cidr': row[2],
-                            'site': row[3] or 'Unassigned',
-                            'utilization': {
-                                'percent': round(utilization_percent, 1),
-                                'assigned': assigned_ips,
-                                'used': used_ips,
-                                'total': total_ips
-                            }
-                        })
-                    # Cache with same structure as admin route expects
-                    admin_result = {
-                        'subnets': admin_subnets,
-                        'can_add_subnet': True,  # Will be checked at render time
-                        'can_edit_subnet': True,  # Will be checked at render time
-                        'can_delete_subnet': True  # Will be checked at render time
-                    }
-                    cache.set('admin', admin_result, ttl=10800)
-                    logging.info(f"Pre-warmed admin cache with {len(admin_subnets)} subnets")
-                    
-                    # Pre-warm all subnet detail pages
-                    logging.info("Pre-warming cache: Loading all subnet detail pages...")
-                    for subnet in subnets:
-                        subnet_id = subnet[0]
-                        try:
-                            cursor.execute('SELECT id, name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
-                            subnet_row = cursor.fetchone()
-                            if subnet_row:
-                                cursor.execute('''
-                                    SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
-                                    FROM IPAddress ip
-                                    LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-                                    LEFT JOIN Device d ON dia.device_id = d.id
-                                    WHERE ip.subnet_id = %s
-                                    ORDER BY INET_ATON(ip.ip)
-                                ''', (subnet_id,))
-                                ip_addresses_with_device = cursor.fetchall()
-                                
-                                cursor.execute('SELECT COUNT(*) FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-                                total_ips = cursor.fetchone()[0]
-                                
-                                cursor.execute('''
-                                    SELECT COUNT(*) FROM IPAddress ip
-                                    WHERE ip.subnet_id = %s AND ip.id IN (SELECT ip_id FROM DeviceIPAddress)
-                                ''', (subnet_id,))
-                                assigned_ips = cursor.fetchone()[0]
-                                
-                                cursor.execute('''
-                                    SELECT COUNT(*) FROM IPAddress ip
-                                    WHERE ip.subnet_id = %s AND ip.hostname = 'DHCP' AND ip.id NOT IN (SELECT ip_id FROM DeviceIPAddress)
-                                ''', (subnet_id,))
-                                dhcp_ips = cursor.fetchone()[0]
-                                
-                                available_ips = total_ips - assigned_ips - dhcp_ips
-                                used_ips = assigned_ips + dhcp_ips
-                                utilization_percent = (used_ips / total_ips * 100) if total_ips > 0 else 0
-                                
-                                utilization_stats = {
-                                    'total': total_ips,
-                                    'assigned': assigned_ips,
-                                    'dhcp': dhcp_ips,
-                                    'available': available_ips,
-                                    'percent': round(utilization_percent, 1)
-                                }
-                                
-                                subnet_dict = {'id': subnet_row[0], 'name': subnet_row[1], 'cidr': subnet_row[2]}
-                                result = {
-                                    'subnet': subnet_dict,
-                                    'ip_addresses': ip_addresses_with_device,
-                                    'utilization': utilization_stats
-                                }
-                                cache.set(f'subnet:{subnet_id}', result, ttl=10800)
-                        except Exception as e:
-                            logging.error(f"Error pre-warming subnet {subnet_id}: {e}")
-                    logging.info(f"Pre-warmed {len(subnets)} subnet detail pages")
-                    
-                    # Pre-warm all device detail pages
-                    logging.info("Pre-warming cache: Loading all device detail pages...")
-                    cursor.execute('SELECT id FROM Device')
-                    device_ids = [row[0] for row in cursor.fetchall()]
-                    for device_id in device_ids:
-                        try:
-                            cursor.execute('SELECT id, name, description, device_type_id FROM Device WHERE id = %s', (device_id,))
-                            device = cursor.fetchone()
-                            if device:
-                                cursor.execute('SELECT id, name FROM DeviceType ORDER BY name')
-                                device_types = cursor.fetchall()
-                                cursor.execute('SELECT id, name, cidr, site FROM Subnet')
-                                subnets = [dict(id=row[0], name=row[1], cidr=row[2], site=row[3]) for row in cursor.fetchall()]
-                                cursor.execute('''SELECT DeviceIPAddress.id as device_ip_id, IPAddress.ip FROM DeviceIPAddress JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id WHERE DeviceIPAddress.device_id = %s''', (device_id,))
-                                device_ips = [{'device_ip_id': row[0], 'ip': row[1]} for row in cursor.fetchall()]
-                                
-                                # Get tags for device (only if tags feature is enabled)
-                                tags_enabled = is_feature_enabled('device_tags', conn=conn)
-                                device_tags = []
-                                all_tags = []
-                                if tags_enabled:
-                                    cursor.execute('''
-                                        SELECT t.id, t.name, t.color
-                                        FROM DeviceTag dt
-                                        JOIN Tag t ON dt.tag_id = t.id
-                                        WHERE dt.device_id = %s
-                                        ORDER BY t.name
-                                    ''', (device_id,))
-                                    device_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
-                                    
-                                    cursor.execute('SELECT id, name, color FROM Tag ORDER BY name')
-                                    all_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
-                                
-                                available_ips_by_subnet = {}
-                                for subnet in subnets:
-                                    cursor.execute('''
-                    SELECT ip.id, ip.ip FROM IPAddress ip
-                    LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-                    WHERE ip.subnet_id = %s AND dia.ip_id IS NULL
-                ''', (subnet['id'],))
-                                    ips = [{'id': row[0], 'ip': row[1]} for row in cursor.fetchall()]
-                                    cursor.execute('SELECT start_ip, end_ip, excluded_ips FROM DHCPPool WHERE subnet_id = %s', (subnet['id'],))
-                                    dhcp_row = cursor.fetchone()
-                                    if dhcp_row:
-                                        start_ip, end_ip, excluded_ips = dhcp_row
-                                        excluded_list = [ip for ip in (excluded_ips or '').replace(' ', '').split(',') if ip]
-                                        in_range = False
-                                        filtered_ips = []
-                                        for ip_obj in ips:
-                                            ip = ip_obj['ip']
-                                            if ip == start_ip:
-                                                in_range = True
-                                            if ip in excluded_list or not (in_range and ip not in excluded_list):
-                                                filtered_ips.append(ip_obj)
-                                            if ip == end_ip:
-                                                in_range = False
-                                        ips = filtered_ips
-                                    available_ips_by_subnet[subnet['id']] = ips
-                                
-                                result_data = {
-                                    'device': {'id': device[0], 'name': device[1], 'description': device[2], 'device_type_id': device[3]},
-                                    'subnets': subnets,
-                                    'device_ips': device_ips,
-                                    'available_ips_by_subnet': available_ips_by_subnet,
-                                    'device_types': device_types,
-                                    'device_tags': device_tags,
-                                    'all_tags': all_tags,
-                                    'can_assign_device_tag': True,  # Will be checked at render time
-                                    'can_remove_device_tag': True   # Will be checked at render time
-                                }
-                                cache.set(f'device:{device_id}', result_data, ttl=10800)
-                        except Exception as e:
-                            logging.error(f"Error pre-warming device {device_id}: {e}")
-                    logging.info(f"Pre-warmed {len(device_ids)} device detail pages")
-                    
-                    logging.info("Cache pre-warming completed successfully")
-                except Exception as e:
-                    logging.error(f"Error during cache pre-warming: {e}")
-                finally:
-                    conn.close()
-        except Exception as e:
-            logging.error(f"Error in cache pre-warming thread: {e}")
-    
-    # Start pre-warming in background thread
-    thread = threading.Thread(target=_prewarm, daemon=True)
-    thread.start()
-    logging.info("Started background cache pre-warming thread")
 
-def register_routes(app, limiter=None):
+def register_routes(app):
     logging.basicConfig(level=logging.INFO)
-    
-    # Helper function to apply rate limiting if limiter is available
-    def rate_limit(limit_str):
-        """Apply rate limiting decorator if limiter is available"""
-        if limiter:
-            return limiter.limit(limit_str)
-        else:
-            # Return a no-op decorator if limiter is not available
-            def noop_decorator(f):
-                return f
-            return noop_decorator
 
     @app.route('/login', methods=['GET', 'POST'])
     def login():
@@ -982,11 +714,6 @@ def register_routes(app, limiter=None):
     @app.route('/')
     @permission_required('view_index')
     def index():
-        cache_key = 'index'
-        cached_result = cache.get(cache_key)
-        if cached_result is not None:
-            return render_with_user('index.html', sites_subnets=cached_result)
-        
         from flask import current_app
         conn = get_db_connection(current_app)
         try:
@@ -1028,8 +755,6 @@ def register_routes(app, limiter=None):
                     'vlan_id': subnet[4],
                     'utilization': round(utilization_percent, 1)
                 })
-            # Cache for 3 hours
-            cache.set(cache_key, sites_subnets, ttl=10800)
             return render_with_user('index.html', sites_subnets=sites_subnets)
         finally:
             conn.close()
@@ -1129,9 +854,6 @@ def register_routes(app, limiter=None):
                 cursor = conn.cursor()
                 cursor.execute('INSERT INTO Device (name, device_type_id) VALUES (%s, %s)', (name, device_type_id))
                 conn.commit()
-            # Invalidate cache
-            cache.clear('devices')
-            cache.clear('device_list')
             logging.info(f"User {user_name} added device '{name}' (type {device_type_id}).")
             return redirect(url_for('devices'))
         return render_with_user('add_device.html', device_types=device_types)
@@ -1139,24 +861,6 @@ def register_routes(app, limiter=None):
     @app.route('/device/<int:device_id>')
     @permission_required('view_device')
     def device(device_id):
-        cache_key = f'device:{device_id}'
-        cached_result = cache.get(cache_key)
-        if cached_result is not None:
-            # Verify device still exists before using cached result
-            from flask import current_app
-            with get_db_connection(current_app) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT id FROM Device WHERE id = %s', (device_id,))
-                if not cursor.fetchone():
-                    # Device was deleted, clear cache and redirect
-                    cache.delete(cache_key)
-                    return redirect(url_for('devices'))
-                # Get custom fields for device (not cached)
-                custom_fields = get_custom_fields_for_entity('device', device_id, conn=conn)
-                cached_result['custom_fields'] = custom_fields
-                cached_result['can_edit_device'] = has_permission('edit_device')
-            return render_with_user('device.html', **cached_result)
-        
         from flask import current_app
         with get_db_connection(current_app) as conn:
             cursor = conn.cursor()
@@ -1261,8 +965,6 @@ def register_routes(app, limiter=None):
             cursor = conn.cursor()
             cursor.execute('UPDATE Device SET device_type_id = %s WHERE id = %s', (device_type_id, device_id))
             conn.commit()
-        # Invalidate cache
-        invalidate_cache_for_device(device_id)
         logging.info(f"User {user_name} updated device {device_id} to type {device_type_id}.")
         return redirect(url_for('device', device_id=device_id))
 
@@ -1321,9 +1023,6 @@ def register_routes(app, limiter=None):
             details = f"Assigned IP {ip} ({subnet_name} {subnet_cidr}) to device {device_name}"
             add_audit_log(session['user_id'], 'device_add_ip', details, subnet_id_val, conn=conn)
             conn.commit()
-        # Invalidate cache
-        invalidate_cache_for_device(device_id)
-        cache.invalidate_subnet(subnet_id_val)
         logging.info(f"User {user_name} assigned IP {ip} to device {device_id}.")
         return redirect(url_for('device', device_id=device_id))
 
@@ -1350,9 +1049,6 @@ def register_routes(app, limiter=None):
             cursor.execute('DELETE FROM DeviceIPAddress WHERE id = %s', (device_ip_id,))
             cursor.execute('UPDATE IPAddress SET hostname = NULL WHERE id = %s', (ip_id,))
             conn.commit()
-        # Invalidate cache
-        invalidate_cache_for_device(device_id)
-        cache.invalidate_subnet(subnet_id_val)
         logging.info(f"User {user_name} removed IP {ip} from device {device_id}.")
         return redirect(url_for('device', device_id=device_id))
 
@@ -1385,9 +1081,6 @@ def register_routes(app, limiter=None):
             cursor.execute('INSERT INTO DeviceTag (device_id, tag_id) VALUES (%s, %s)', (device_id, tag_id))
             add_audit_log(session['user_id'], 'assign_device_tag', f"Assigned tag '{tag_name}' to device '{device_name}'", conn=conn)
             conn.commit()
-            # Invalidate cache
-            invalidate_cache_for_device(device_id)
-            cache.clear('devices')
         return redirect(url_for('device', device_id=device_id))
 
     @app.route('/device/<int:device_id>/remove_tag', methods=['POST'])
@@ -1415,9 +1108,6 @@ def register_routes(app, limiter=None):
             cursor.execute('DELETE FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
             add_audit_log(session['user_id'], 'remove_device_tag', f"Removed tag '{tag_name}' from device '{device_name}'", conn=conn)
             conn.commit()
-            # Invalidate cache
-            invalidate_cache_for_device(device_id)
-            cache.clear('devices')
         return redirect(url_for('device', device_id=device_id))
 
     @app.route('/delete_device', methods=['POST'])
@@ -1426,7 +1116,6 @@ def register_routes(app, limiter=None):
         device_id = request.form['device_id']
         user_name = get_current_user_name()
         from flask import current_app
-        subnet_ids_to_invalidate = set()
         with get_db_connection(current_app) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
@@ -1434,15 +1123,6 @@ def register_routes(app, limiter=None):
             if device_row:
                 device_name = device_row[0]
                 add_audit_log(session['user_id'], 'delete_device', f"Deleted device {device_name}", conn=conn)
-                # Get subnet IDs for all IPs assigned to this device before deleting
-                cursor.execute('''
-                    SELECT DISTINCT ip.subnet_id 
-                    FROM DeviceIPAddress dia
-                    JOIN IPAddress ip ON dia.ip_id = ip.id
-                    WHERE dia.device_id = %s
-                ''', (device_id,))
-                subnet_ids_to_invalidate = {row[0] for row in cursor.fetchall()}
-                
                 cursor.execute('SELECT ip_id FROM DeviceIPAddress WHERE device_id = %s', (device_id,))
                 ip_ids = [row[0] for row in cursor.fetchall()]
                 if ip_ids:
@@ -1450,43 +1130,12 @@ def register_routes(app, limiter=None):
                 cursor.execute('DELETE FROM DeviceIPAddress WHERE device_id = %s', (device_id,))
                 cursor.execute('DELETE FROM Device WHERE id = %s', (device_id,))
                 conn.commit()
-        # Invalidate cache
-        invalidate_cache_for_device(device_id)
-        cache.clear('devices')
-        # Invalidate subnet caches for all subnets that had IPs assigned to this device
-        for subnet_id in subnet_ids_to_invalidate:
-            cache.invalidate_subnet(subnet_id)
         logging.info(f"User {user_name} deleted device '{device_name}'.")
         return redirect(url_for('devices'))
 
     @app.route('/subnet/<int:subnet_id>')
     @permission_required('view_subnet')
     def subnet(subnet_id):
-        cache_key = f'subnet:{subnet_id}'
-        cached_result = cache.get(cache_key)
-        if cached_result is not None:
-            from flask import current_app
-            with get_db_connection(current_app) as conn:
-                custom_fields = get_custom_fields_for_entity('subnet', subnet_id, conn=conn)
-                # Ensure VLAN fields are in cached subnet dict
-                subnet_dict = cached_result['subnet']
-                if 'vlan_id' not in subnet_dict:
-                    cursor = conn.cursor()
-                    cursor.execute('SELECT vlan_id, vlan_description, vlan_notes FROM Subnet WHERE id = %s', (subnet_id,))
-                    vlan_row = cursor.fetchone()
-                    if vlan_row:
-                        subnet_dict['vlan_id'] = vlan_row[0]
-                        subnet_dict['vlan_description'] = vlan_row[1]
-                        subnet_dict['vlan_notes'] = vlan_row[2]
-                # Check if IP address notes feature is enabled
-                ip_notes_enabled = is_feature_enabled('ip_address_notes', conn=conn)
-            return render_with_user('subnet.html', subnet=subnet_dict, 
-                                  ip_addresses=cached_result['ip_addresses'], 
-                                  utilization=cached_result['utilization'],
-                                  custom_fields=custom_fields,
-                                  can_edit_subnet=has_permission('edit_subnet'),
-                                  ip_notes_enabled=ip_notes_enabled)
-        
         from flask import current_app
         with get_db_connection(current_app) as conn:
             cursor = conn.cursor()
@@ -1541,14 +1190,6 @@ def register_routes(app, limiter=None):
                 'vlan_description': subnet[4] if len(subnet) > 4 else None,
                 'vlan_notes': subnet[5] if len(subnet) > 5 else None
             }
-            result = {
-                'subnet': subnet_dict,
-                'ip_addresses': ip_addresses_with_device,
-                'utilization': utilization_stats
-            }
-            # Cache for 3 hours
-            cache.set(cache_key, result, ttl=10800)
-            
             # Check if IP address notes feature is enabled
             ip_notes_enabled = is_feature_enabled('ip_address_notes', conn=conn)
             
@@ -1595,10 +1236,6 @@ def register_routes(app, limiter=None):
             vlan_info = f" (VLAN {vlan_id})" if vlan_id else ""
             add_audit_log(session['user_id'], 'add_subnet', f"Added subnet {name} ({cidr}){vlan_info}", subnet_id, conn=conn)
             conn.commit()
-        # Invalidate cache
-        cache.clear('index')
-        cache.clear('admin')
-        cache.clear('subnet_list')
         # Note: subnet_id is new, so no need to invalidate specific subnet cache
         logging.info(f"User {user_name} added subnet '{name}' ({cidr}) at site '{site}'.")
         return redirect(url_for('admin'))
@@ -1635,8 +1272,6 @@ def register_routes(app, limiter=None):
                 vlan_info = f" (VLAN {vlan_id})" if vlan_id else ""
                 add_audit_log(session['user_id'], 'edit_subnet', f"Edited subnet from {old_name} ({old_cidr}) to {name} ({cidr}) at site {site}{vlan_info}", subnet_id, conn=conn)
                 conn.commit()
-        # Invalidate cache
-        invalidate_cache_for_subnet(subnet_id)
         logging.info(f"User {user_name} edited subnet {subnet_id}.")
         return redirect(url_for('admin'))
 
@@ -1660,43 +1295,12 @@ def register_routes(app, limiter=None):
             cursor.execute('DELETE FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
             cursor.execute('DELETE FROM Subnet WHERE id = %s', (subnet_id,))
             conn.commit()
-        # Invalidate cache
-        invalidate_cache_for_subnet(subnet_id)
         logging.info(f"User {user_name} deleted subnet {subnet_id}.")
         return redirect(url_for('admin'))
 
     @app.route('/admin', methods=['GET', 'POST'])
     @permission_required('view_admin')
     def admin():
-        cache_key = 'admin'
-        cached_result = cache.get(cache_key)
-        
-        # Check if cached data has VLAN fields (for backward compatibility)
-        if cached_result is not None:
-            # Verify cached subnets have VLAN fields, if not, refresh cache
-            if cached_result.get('subnets') and len(cached_result['subnets']) > 0:
-                sample_subnet = cached_result['subnets'][0]
-                if 'vlan_id' not in sample_subnet:
-                    # Cache is stale, clear it and regenerate
-                    cache.clear(cache_key)
-                    cached_result = None
-        
-        if cached_result is not None:
-            # Always fetch feature flags fresh (they might have changed)
-            from flask import current_app
-            with get_db_connection(current_app) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT feature_key, enabled, description FROM FeatureFlags ORDER BY feature_key')
-                feature_flags = []
-                for row in cursor.fetchall():
-                    feature_flags.append({
-                        'key': row[0],
-                        'enabled': bool(row[1]),
-                        'description': row[2]
-                    })
-            cached_result['feature_flags'] = feature_flags
-            return render_with_user('admin.html', **cached_result)
-        
         from flask import current_app
         with get_db_connection(current_app) as conn:
             cursor = conn.cursor()
@@ -1760,9 +1364,6 @@ def register_routes(app, limiter=None):
             'can_delete_subnet': has_permission('delete_subnet'),
             'feature_flags': feature_flags
         }
-        # Cache for 3 hours
-        cache.set(cache_key, result_data, ttl=10800)
-        
         return render_with_user('admin.html', **result_data)
 
     @app.route('/admin/feature_flags', methods=['POST'])
@@ -1787,7 +1388,6 @@ def register_routes(app, limiter=None):
             conn.commit()
         
         # Clear admin cache to refresh feature flags
-        cache.clear('admin')
         
         return redirect(url_for('admin'))
 
@@ -2152,9 +1752,6 @@ def register_routes(app, limiter=None):
                                              (name, color, description))
                                 add_audit_log(session['user_id'], 'add_tag', f"Added tag '{name}'", conn=conn)
                                 conn.commit()
-                                # Invalidate device caches since they contain tags
-                                cache.clear('device:')
-                                cache.clear('devices')
                             except mysql.connector.IntegrityError:
                                 error = 'Tag name already exists.'
                 
@@ -2175,9 +1772,6 @@ def register_routes(app, limiter=None):
                                              (name, color, description, tag_id))
                                 add_audit_log(session['user_id'], 'edit_tag', f"Updated tag '{name}'", conn=conn)
                                 conn.commit()
-                                # Invalidate device caches since they contain tags
-                                cache.clear('device:')
-                                cache.clear('devices')
                             except mysql.connector.IntegrityError:
                                 error = 'Tag name already exists.'
                 
@@ -2191,9 +1785,6 @@ def register_routes(app, limiter=None):
                         cursor.execute('DELETE FROM Tag WHERE id = %s', (tag_id,))
                         add_audit_log(session['user_id'], 'delete_tag', f"Deleted tag '{tag_name}'", conn=conn)
                         conn.commit()
-                        # Invalidate device caches since they contain tags
-                        cache.clear('device:')
-                        cache.clear('devices')
             
             # Get all tags with device counts
             cursor.execute('''
@@ -2587,14 +2178,7 @@ def register_routes(app, limiter=None):
     @app.route('/check_update')
     @login_required
     def check_update():
-        """Check for available updates from Gitea (cached for 3 hours)"""
-        cache_key = 'check_update'
-        
-        # Check cache first
-        cached_result = cache.get(cache_key)
-        if cached_result is not None:
-            return jsonify(cached_result)
-        
+        """Check for available updates from Gitea"""
         try:
             # Get current version from environment
             current_version = os.environ.get('VERSION', 'unknown').lstrip('v')
@@ -2637,8 +2221,6 @@ def register_routes(app, limiter=None):
                             'release_url': release_data.get('html_url', '')
                         }
             
-            # Cache result for 3 hours (10800 seconds)
-            cache.set(cache_key, result, ttl=10800)
             return jsonify(result)
                 
         except requests.RequestException as e:
@@ -2894,9 +2476,6 @@ def register_routes(app, limiter=None):
             cursor.execute('UPDATE IPAddress SET hostname = %s WHERE hostname = %s', (new_name, old_name))
             conn.commit()
             add_audit_log(session['user_id'], 'rename_device', f"Renamed device '{old_name}' to '{new_name}'", conn=conn)
-            # Invalidate cache
-            invalidate_cache_for_device(device_id)
-            cache.clear('subnet:')  # Invalidate all subnet caches since hostnames changed
         logging.info(f"User {user_name} renamed device {device_id} from '{old_name}' to '{new_name}'.")
         return redirect(url_for('device', device_id=device_id))
 
@@ -2911,8 +2490,6 @@ def register_routes(app, limiter=None):
             cursor = conn.cursor()
             cursor.execute('UPDATE Device SET description = %s WHERE id = %s', (description, device_id))
             conn.commit()
-        # Invalidate cache
-        invalidate_cache_for_device(device_id)
         logging.info(f"User {user_name} updated description for device {device_id}.")
         return redirect(url_for('device', device_id=device_id))
 
@@ -2951,9 +2528,6 @@ def register_routes(app, limiter=None):
                 subnet_id,
                 conn=conn
             )
-        
-        # Invalidate subnet cache
-        invalidate_cache_for_subnet(subnet_id)
         
         logging.info(f"User {user_name} updated notes for IP {ip_address} (ID: {ip_id}).")
         return jsonify({'success': True, 'message': 'Notes updated successfully'})
@@ -3024,7 +2598,6 @@ def register_routes(app, limiter=None):
             add_audit_log(session['user_id'], 'update_device_custom_fields', 
                          f"Updated custom fields for device {device_id}", conn=conn)
             conn.commit()
-            invalidate_cache_for_device(device_id)
         
         if request.headers.get('Content-Type') == 'application/json':
             return jsonify({'success': True, 'message': 'Custom fields updated successfully'})
@@ -3105,7 +2678,6 @@ def register_routes(app, limiter=None):
             add_audit_log(session['user_id'], 'update_subnet_custom_fields', 
                          f"Updated custom fields for subnet {subnet_id}", conn=conn)
             conn.commit()
-            invalidate_cache_for_subnet(subnet_id)
         
         if request.is_json or request.headers.get('Content-Type') == 'application/json':
             return jsonify({'success': True, 'message': 'Custom fields updated successfully'})
@@ -3184,10 +2756,6 @@ def register_routes(app, limiter=None):
                         conn.commit()
                         dhcp_pool = None
                         add_audit_log(session['user_id'], 'dhcp_pool_remove', f"Removed DHCP pool for subnet {subnet[1]} ({subnet[2]})", subnet_id, conn=conn)
-                        # Invalidate subnet cache and related caches
-                        cache.invalidate_subnet(subnet_id)
-                        cache.clear('index')
-                        cache.clear('admin')
                     else:
                         start_ip = request.form['start_ip']
                         end_ip = request.form['end_ip']
@@ -3218,10 +2786,6 @@ def register_routes(app, limiter=None):
                             conn.commit()
                             dhcp_pool = {'start_ip': start_ip, 'end_ip': end_ip, 'excluded_ips': excluded_ips}
                             add_audit_log(session['user_id'], action, details, subnet_id, conn=conn)
-                            # Invalidate subnet cache and related caches
-                            cache.invalidate_subnet(subnet_id)
-                            cache.clear('index')
-                            cache.clear('admin')
             return render_with_user('dhcp.html', subnet={'id': subnet[0], 'name': subnet[1]}, dhcp_pool=dhcp_pool, error=error)
 
     @app.route('/device_type_stats')
@@ -3264,10 +2828,6 @@ def register_routes(app, limiter=None):
                             try:
                                 cursor.execute('INSERT INTO DeviceType (name, icon_class) VALUES (%s, %s)', (name, icon_class))
                                 conn.commit()
-                                # Invalidate all device caches since they contain device_types list
-                                cache.clear('device:')
-                                cache.clear('devices')
-                                cache.clear('device_list')
                                 logging.info(f"User {user_name} added device type '{name}' with icon '{icon_class}'.")
                             except mysql.connector.IntegrityError as e:
                                 if e.errno == 1062:  # Duplicate entry
@@ -3289,9 +2849,6 @@ def register_routes(app, limiter=None):
                             try:
                                 cursor.execute('UPDATE DeviceType SET name = %s, icon_class = %s WHERE id = %s', (name, icon_class, device_type_id))
                                 conn.commit()
-                                cache.clear('device:')
-                                cache.clear('devices')
-                                cache.clear('device_list')
                                 logging.info(f"User {user_name} edited device type {device_type_id} to '{name}' with icon '{icon_class}'.")
                             except mysql.connector.IntegrityError as e:
                                 if e.errno == 1062:  # Duplicate entry
@@ -3315,10 +2872,6 @@ def register_routes(app, limiter=None):
                             device_type_name = cursor.fetchone()[0]
                             cursor.execute('DELETE FROM DeviceType WHERE id = %s', (device_type_id,))
                             conn.commit()
-                            # Invalidate all device caches since they contain device_types list
-                            cache.clear('device:')
-                            cache.clear('devices')
-                            cache.clear('device_list')
                             logging.info(f"User {user_name} deleted device type '{device_type_name}'.")
             cursor.execute('SELECT id, name, icon_class FROM DeviceType ORDER BY name')
             device_types = cursor.fetchall()
@@ -3797,7 +3350,6 @@ def register_routes(app, limiter=None):
     # ========== API ROUTES ==========
     
     @app.route('/api/v1/info', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_auth_required
     def api_info():
         """Get API information and authenticated user info"""
@@ -3812,7 +3364,6 @@ def register_routes(app, limiter=None):
     
     # Devices API
     @app.route('/api/v1/devices', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_devices')
     def api_devices():
         """Get all devices"""
@@ -3856,7 +3407,6 @@ def register_routes(app, limiter=None):
         return jsonify({'devices': devices})
     
     @app.route('/api/v1/devices/<int:device_id>', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_device')
     def api_device(device_id):
         """Get a specific device"""
@@ -3901,7 +3451,6 @@ def register_routes(app, limiter=None):
         return jsonify(device)
     
     @app.route('/api/v1/devices', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('add_device')
     def api_add_device():
         """Create a new device"""
@@ -3924,7 +3473,6 @@ def register_routes(app, limiter=None):
         return jsonify({'id': device_id, 'name': name, 'description': description, 'device_type_id': device_type_id}), 201
     
     @app.route('/api/v1/devices/<int:device_id>', methods=['PUT'])
-    @rate_limit("50 per minute")
     @api_permission_required('edit_device')
     def api_update_device(device_id):
         """Update a device"""
@@ -3972,12 +3520,10 @@ def register_routes(app, limiter=None):
         return jsonify({'message': 'Device updated successfully', 'device': {'id': device_id, 'name': new_name}})
     
     @app.route('/api/v1/devices/<int:device_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('delete_device')
     def api_delete_device(device_id):
         """Delete a device"""
         from flask import current_app
-        subnet_ids_to_invalidate = set()
         with get_db_connection(current_app) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
@@ -3985,15 +3531,6 @@ def register_routes(app, limiter=None):
             if not device:
                 return jsonify({'error': 'Device not found'}), 404
             device_name = device[0]
-            # Get subnet IDs for all IPs assigned to this device before deleting
-            cursor.execute('''
-                SELECT DISTINCT ip.subnet_id 
-                FROM DeviceIPAddress dia
-                JOIN IPAddress ip ON dia.ip_id = ip.id
-                WHERE dia.device_id = %s
-            ''', (device_id,))
-            subnet_ids_to_invalidate = {row[0] for row in cursor.fetchall()}
-            
             cursor.execute('SELECT ip_id FROM DeviceIPAddress WHERE device_id = %s', (device_id,))
             ip_ids = [row[0] for row in cursor.fetchall()]
             if ip_ids:
@@ -4002,14 +3539,9 @@ def register_routes(app, limiter=None):
             cursor.execute('DELETE FROM Device WHERE id = %s', (device_id,))
             add_audit_log(request.api_user['id'], 'delete_device', f"Deleted device {device_name}", conn=conn)
             conn.commit()
-        invalidate_cache_for_device(device_id)
-        # Invalidate subnet caches for all subnets that had IPs assigned to this device
-        for subnet_id in subnet_ids_to_invalidate:
-            cache.invalidate_subnet(subnet_id)
         return jsonify({'message': 'Device deleted successfully', 'device': {'id': device_id, 'name': device_name}})
     
     @app.route('/api/v1/devices/<int:device_id>/ips', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('add_device_ip')
     def api_add_device_ip(device_id):
         """Add an IP address to a device"""
@@ -4072,7 +3604,6 @@ def register_routes(app, limiter=None):
         return jsonify({'message': 'IP address added to device successfully', 'ip_id': ip_id}), 201
     
     @app.route('/api/v1/devices/<int:device_id>/ips/<int:ip_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('remove_device_ip')
     def api_remove_device_ip(device_id, ip_id):
         """Remove an IP address from a device"""
@@ -4105,7 +3636,6 @@ def register_routes(app, limiter=None):
     
     # Subnets API
     @app.route('/api/v1/subnets', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_subnet')
     def api_subnets():
         """Get all subnets"""
@@ -4133,7 +3663,6 @@ def register_routes(app, limiter=None):
         return jsonify({'subnets': subnets})
     
     @app.route('/api/v1/subnets/<int:subnet_id>', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_subnet')
     def api_subnet(subnet_id):
         """Get a specific subnet with IP addresses"""
@@ -4166,7 +3695,6 @@ def register_routes(app, limiter=None):
         return jsonify(subnet)
     
     @app.route('/api/v1/subnets/<int:subnet_id>/next_free_ip', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_subnet')
     def api_subnet_next_free_ip(subnet_id):
         """Get the next free IP address in a subnet"""
@@ -4194,7 +3722,6 @@ def register_routes(app, limiter=None):
             return jsonify({'id': result['id'], 'ip': result['ip']})
     
     @app.route('/api/v1/subnets', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('add_subnet')
     def api_add_subnet():
         """Create a new subnet"""
@@ -4246,7 +3773,6 @@ def register_routes(app, limiter=None):
         }), 201
     
     @app.route('/api/v1/subnets/<int:subnet_id>', methods=['PUT'])
-    @rate_limit("50 per minute")
     @api_permission_required('edit_subnet')
     def api_update_subnet(subnet_id):
         """Update a subnet"""
@@ -4337,7 +3863,6 @@ def register_routes(app, limiter=None):
         })
     
     @app.route('/api/v1/subnets/<int:subnet_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('delete_subnet')
     def api_delete_subnet(subnet_id):
         """Delete a subnet"""
@@ -4363,7 +3888,6 @@ def register_routes(app, limiter=None):
     
     # Racks API
     @app.route('/api/v1/racks', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_racks')
     def api_racks():
         """Get all racks"""
@@ -4392,7 +3916,6 @@ def register_routes(app, limiter=None):
         return jsonify({'racks': racks})
     
     @app.route('/api/v1/racks/<int:rack_id>', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_rack')
     def api_rack(rack_id):
         """Get a specific rack"""
@@ -4418,7 +3941,6 @@ def register_routes(app, limiter=None):
         return jsonify(rack)
     
     @app.route('/api/v1/racks', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('add_rack')
     def api_add_rack():
         """Create a new rack"""
@@ -4449,7 +3971,6 @@ def register_routes(app, limiter=None):
         return jsonify({'id': rack_id, 'name': name, 'site': site, 'height_u': height_u}), 201
     
     @app.route('/api/v1/racks/<int:rack_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('delete_rack')
     def api_delete_rack(rack_id):
         """Delete a rack"""
@@ -4470,7 +3991,6 @@ def register_routes(app, limiter=None):
         return jsonify({'message': 'Rack deleted successfully', 'rack': {'id': rack_id, 'name': rack_name}})
     
     @app.route('/api/v1/racks/<int:rack_id>/devices', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('add_device_to_rack')
     def api_add_device_to_rack(rack_id):
         """Add a device to a rack"""
@@ -4558,7 +4078,6 @@ def register_routes(app, limiter=None):
         }), 201
     
     @app.route('/api/v1/racks/<int:rack_id>/devices/<int:rack_device_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('remove_device_from_rack')
     def api_remove_device_from_rack(rack_id, rack_device_id):
         """Remove a device from a rack"""
@@ -4595,7 +4114,6 @@ def register_routes(app, limiter=None):
     
     # Custom Fields API
     @app.route('/api/v1/custom_fields/<entity_type>', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_custom_fields')
     def api_custom_fields_by_type(entity_type):
         """Get custom field definitions for a specific entity type"""
@@ -4623,7 +4141,6 @@ def register_routes(app, limiter=None):
         return jsonify({'fields': fields})
     
     @app.route('/api/v1/custom_fields', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('manage_custom_fields')
     def api_add_custom_field():
         """Create a new custom field definition"""
@@ -4665,7 +4182,6 @@ def register_routes(app, limiter=None):
                 return jsonify({'error': f'Field key "{data["field_key"]}" already exists'}), 400
     
     @app.route('/api/v1/custom_fields/<int:field_id>', methods=['PUT'])
-    @rate_limit("50 per minute")
     @api_permission_required('manage_custom_fields')
     def api_update_custom_field(field_id):
         """Update a custom field definition"""
@@ -4720,7 +4236,6 @@ def register_routes(app, limiter=None):
         return jsonify({'message': 'Custom field updated successfully'})
     
     @app.route('/api/v1/custom_fields/<int:field_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('manage_custom_fields')
     def api_delete_custom_field(field_id):
         """Delete a custom field definition"""
@@ -4740,7 +4255,6 @@ def register_routes(app, limiter=None):
     
     # Device Types API
     @app.route('/api/v1/device-types', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_device_types')
     def api_device_types():
         """Get all device types"""
@@ -4753,7 +4267,6 @@ def register_routes(app, limiter=None):
     
     # DHCP API
     @app.route('/api/v1/subnets/<int:subnet_id>/dhcp', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_dhcp')
     def api_get_dhcp(subnet_id):
         """Get DHCP pools for a subnet"""
@@ -4765,7 +4278,6 @@ def register_routes(app, limiter=None):
         return jsonify({'pools': pools})
     
     @app.route('/api/v1/subnets/<int:subnet_id>/dhcp', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('configure_dhcp')
     def api_configure_dhcp(subnet_id):
         """Configure DHCP pools for a subnet"""
@@ -4793,10 +4305,6 @@ def register_routes(app, limiter=None):
                     conn=conn
                 )
                 conn.commit()
-                # Invalidate subnet cache and related caches
-                cache.invalidate_subnet(subnet_id)
-                cache.clear('index')
-                cache.clear('admin')
                 return jsonify({'message': 'DHCP pool removed successfully'})
             
             pools = data.get('pools')
@@ -4847,15 +4355,10 @@ def register_routes(app, limiter=None):
             
             add_audit_log(request.api_user['id'], action, details, subnet_id, conn=conn)
             conn.commit()
-        # Invalidate subnet cache and related caches
-        cache.invalidate_subnet(subnet_id)
-        cache.clear('index')
-        cache.clear('admin')
         return jsonify({'message': 'DHCP pools configured successfully', 'pool': {'start_ip': start_ip, 'end_ip': end_ip, 'excluded_ips': excluded_list}})
     
     # Tags API
     @app.route('/api/v1/tags', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_tags')
     def api_tags():
         """Get all tags"""
@@ -4873,7 +4376,6 @@ def register_routes(app, limiter=None):
         return jsonify({'tags': tags})
     
     @app.route('/api/v1/tags', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('add_tag')
     def api_add_tag():
         """Create a new tag"""
@@ -4901,15 +4403,11 @@ def register_routes(app, limiter=None):
                 tag_id = cursor.lastrowid
                 add_audit_log(request.api_user['id'], 'add_tag', f"Added tag '{name}'", conn=conn)
                 conn.commit()
-                # Invalidate device caches since they contain tags
-                cache.clear('device:')
-                cache.clear('devices')
                 return jsonify({'id': tag_id, 'name': name, 'color': color, 'description': description}), 201
             except mysql.connector.IntegrityError:
                 return jsonify({'error': 'Tag name already exists'}), 400
     
     @app.route('/api/v1/tags/<int:tag_id>', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_tags')
     def api_tag(tag_id):
         """Get a specific tag"""
@@ -4935,7 +4433,6 @@ def register_routes(app, limiter=None):
         return jsonify(tag)
     
     @app.route('/api/v1/tags/<int:tag_id>', methods=['PUT'])
-    @rate_limit("50 per minute")
     @api_permission_required('edit_tag')
     def api_update_tag(tag_id):
         """Update a tag"""
@@ -4983,15 +4480,11 @@ def register_routes(app, limiter=None):
                 cursor.execute(f'UPDATE Tag SET {", ".join(updates)} WHERE id = %s', values)
                 add_audit_log(request.api_user['id'], 'edit_tag', f"Updated tag '{current_name}'", conn=conn)
                 conn.commit()
-                # Invalidate device caches since they contain tags
-                cache.clear('device:')
-                cache.clear('devices')
                 return jsonify({'message': 'Tag updated successfully'})
             except mysql.connector.IntegrityError:
                 return jsonify({'error': 'Tag name already exists'}), 400
     
     @app.route('/api/v1/tags/<int:tag_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('delete_tag')
     def api_delete_tag(tag_id):
         """Delete a tag"""
@@ -5009,13 +4502,9 @@ def register_routes(app, limiter=None):
             cursor.execute('DELETE FROM Tag WHERE id = %s', (tag_id,))
             add_audit_log(request.api_user['id'], 'delete_tag', f"Deleted tag '{tag_name}'", conn=conn)
             conn.commit()
-        # Invalidate device caches since they contain tags
-        cache.clear('device:')
-        cache.clear('devices')
         return jsonify({'message': 'Tag deleted successfully'})
     
     @app.route('/api/v1/devices/<int:device_id>/tags', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_device')
     def api_device_tags(device_id):
         """Get tags for a specific device"""
@@ -5039,7 +4528,6 @@ def register_routes(app, limiter=None):
         return jsonify({'tags': tags})
     
     @app.route('/api/v1/devices/<int:device_id>/tags', methods=['POST'])
-    @rate_limit("50 per minute")
     @api_permission_required('assign_device_tag')
     def api_assign_device_tag(device_id):
         """Assign a tag to a device"""
@@ -5075,12 +4563,9 @@ def register_routes(app, limiter=None):
             cursor.execute('INSERT INTO DeviceTag (device_id, tag_id) VALUES (%s, %s)', (device_id, tag_id))
             add_audit_log(request.api_user['id'], 'assign_device_tag', f"Assigned tag '{tag_name}' to device '{device_name}'", conn=conn)
             conn.commit()
-        invalidate_cache_for_device(device_id)
-        cache.clear('devices')
         return jsonify({'message': 'Tag assigned successfully'})
     
     @app.route('/api/v1/devices/<int:device_id>/tags/<int:tag_id>', methods=['DELETE'])
-    @rate_limit("50 per minute")
     @api_permission_required('remove_device_tag')
     def api_remove_device_tag(device_id, tag_id):
         """Remove a tag from a device"""
@@ -5109,12 +4594,9 @@ def register_routes(app, limiter=None):
             cursor.execute('DELETE FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
             add_audit_log(request.api_user['id'], 'remove_device_tag', f"Removed tag '{tag_name}' from device '{device_name}'", conn=conn)
             conn.commit()
-        invalidate_cache_for_device(device_id)
-        cache.clear('devices')
         return jsonify({'message': 'Tag removed successfully'})
     
     @app.route('/api/v1/devices/by-tag/<tag_identifier>', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_devices')
     def api_devices_by_tag(tag_identifier):
         """Get devices by tag name or ID. Use ?format=simple for simplified response."""
@@ -5227,7 +4709,6 @@ def register_routes(app, limiter=None):
     
     # Audit Log API
     @app.route('/api/v1/audit', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_audit')
     def api_audit():
         """Get audit log entries"""
@@ -5248,7 +4729,6 @@ def register_routes(app, limiter=None):
     
     # Users API (admin only)
     @app.route('/api/v1/users', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_users')
     def api_users():
         """Get all users (admin only)"""
@@ -5269,7 +4749,6 @@ def register_routes(app, limiter=None):
     
     # Roles API (admin only)
     @app.route('/api/v1/roles', methods=['GET'])
-    @rate_limit("100 per minute")
     @api_permission_required('view_users')
     def api_roles():
         """Get all roles (admin only)"""
@@ -5352,7 +4831,6 @@ def register_routes(app, limiter=None):
         results = {'success': [], 'failed': []}
         
         from flask import current_app
-        subnet_ids_to_invalidate = set()
         with get_db_connection(current_app) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
@@ -5371,7 +4849,6 @@ def register_routes(app, limiter=None):
                         continue
                     
                     ip, subnet_id = ip_row[0], ip_row[1]
-                    subnet_ids_to_invalidate.add(subnet_id)
                     
                     # Check if IP is already assigned
                     cursor.execute('SELECT id FROM DeviceIPAddress WHERE ip_id = %s', (ip_id,))
@@ -5416,10 +4893,6 @@ def register_routes(app, limiter=None):
             
             conn.commit()
         
-        # Invalidate device and subnet caches
-        invalidate_cache_for_device(device_id)
-        for subnet_id in subnet_ids_to_invalidate:
-            cache.invalidate_subnet(subnet_id)
         return jsonify(results)
     
     @app.route('/bulk/create_devices', methods=['POST'])
@@ -5450,10 +4923,6 @@ def register_routes(app, limiter=None):
                 except Exception as e:
                     results['failed'].append({'name': name, 'reason': str(e)})
             conn.commit()
-        
-        # Invalidate devices cache
-        cache.clear('devices')
-        cache.clear('device_list')
         logging.info(f"User {user_name} bulk created {len(results['success'])} devices.")
         return jsonify(results)
     
@@ -5504,10 +4973,6 @@ def register_routes(app, limiter=None):
                         results['failed'].append({'device_id': device_id, 'tag_id': tag_id, 'reason': str(e)})
             conn.commit()
         
-        # Invalidate device caches for all affected devices
-        for device_id in device_ids:
-            invalidate_cache_for_device(device_id)
-        cache.clear('devices')
         logging.info(f"User {user_name} bulk assigned tags to {len(device_ids)} devices.")
         return jsonify(results)
     
