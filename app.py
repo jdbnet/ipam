@@ -3058,11 +3058,6 @@ def search():
     
     return render_with_user('search.html', query=query, results=results)
 
-@app.route('/help')
-@permission_required('view_help')
-def help():
-    return render_with_user('help.html')
-
 # ========== API ROUTES ==========
 
 @app.route('/api/v1/info', methods=['GET'])

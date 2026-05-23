@@ -209,7 +209,7 @@ The application includes a comprehensive REST API for programmatic access:
 
 4. **API Keys**: Each user has a unique API key that can be viewed and regenerated from the Users page. API keys respect the same role-based permissions as the web interface.
 
-5. **Documentation**: Full API documentation is available in the Help page of the web interface.
+5. **Documentation**: See [API.md](API.md) for the full REST API reference.
 
 **Example API Requests**:
 ```bash

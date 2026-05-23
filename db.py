@@ -393,7 +393,6 @@ def init_db(app=None):
         ('view_device_type_stats', 'View Device Type Statistics', 'View'),
         ('view_devices_by_type', 'View Devices by Type', 'View'),
         ('view_dhcp', 'View DHCP configuration', 'View'),
-        ('view_help', 'View Help page', 'View'),
         
         # Device permissions
         ('add_device', 'Add new device', 'Device'),
@@ -490,7 +489,7 @@ def init_db(app=None):
     non_admin_permissions = [
         'view_index', 'view_devices', 'view_device', 'view_subnet', 'view_racks', 'view_rack',
         'view_audit', 'view_device_types', 'view_device_type_stats', 'view_devices_by_type',
-        'view_dhcp', 'view_help',
+        'view_dhcp',
         'add_device', 'edit_device', 'delete_device', 'add_device_ip', 'remove_device_ip',
         'add_subnet', 'edit_subnet', 'delete_subnet', 'export_subnet_csv',
         'add_rack', 'delete_rack', 'add_device_to_rack', 'remove_device_from_rack',
@@ -517,7 +516,7 @@ def init_db(app=None):
     view_only_permissions = [
         'view_index', 'view_devices', 'view_device', 'view_subnet', 'view_racks', 'view_rack',
         'view_audit', 'view_device_types', 'view_device_type_stats', 'view_devices_by_type',
-        'view_dhcp', 'view_help', 'view_tags', 'view_custom_fields'
+        'view_dhcp', 'view_tags', 'view_custom_fields'
     ]
     
     for perm_name in view_only_permissions:
