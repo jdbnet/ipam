@@ -15,7 +15,7 @@ const router = createRouter({
         { path: "devices", name: "devices", component: () => import("@/views/DevicesView.vue") },
         { path: "devices/:id", name: "device", component: () => import("@/views/DeviceDetailView.vue") },
         { path: "subnets/:id", name: "subnet", component: () => import("@/views/SubnetDetailView.vue") },
-        { path: "subnets/:id/dhcp", name: "dhcp", component: () => import("@/views/DhcpView.vue") },
+        { path: "subnets/:id/dhcp", redirect: (to) => `/subnets/${to.params.id}` },
         { path: "racks", name: "racks", component: () => import("@/views/RacksView.vue") },
         { path: "racks/:id", name: "rack", component: () => import("@/views/RackDetailView.vue") },
         { path: "search", redirect: "/" },

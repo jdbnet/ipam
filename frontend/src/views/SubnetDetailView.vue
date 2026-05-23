@@ -4,15 +4,19 @@ import { useRoute, RouterLink } from "vue-router";
 import { api, type Subnet } from "@/api";
 import { useAuthStore } from "@/stores/auth";
 import IpHistoryModal from "@/components/IpHistoryModal.vue";
+import DhcpModal from "@/components/DhcpModal.vue";
 
 const route = useRoute();
 const auth = useAuthStore();
 const subnet = ref<Subnet | null>(null);
 const historyIp = ref<string | null>(null);
+const showDhcp = ref(false);
 
-onMounted(async () => {
+async function loadSubnet() {
   subnet.value = await api.subnet(Number(route.params.id));
-});
+}
+
+onMounted(loadSubnet);
 
 async function saveNotes(ipId: number, notes: string) {
   await api.patchIpNotes(ipId, notes);
@@ -27,7 +31,14 @@ async function saveNotes(ipId: number, notes: string) {
         <p class="font-mono text-slate-500">{{ subnet.cidr }} · {{ subnet.site || "Unassigned" }}</p>
       </div>
       <div class="flex gap-2">
-        <RouterLink :to="`/subnets/${subnet.id}/dhcp`" class="btn-secondary text-sm">DHCP</RouterLink>
+        <button
+          v-if="auth.can('view_dhcp') || auth.can('configure_dhcp')"
+          type="button"
+          class="btn-secondary text-sm"
+          @click="showDhcp = true"
+        >
+          DHCP
+        </button>
         <a v-if="auth.can('export_subnet_csv')" :href="`/api/v2/subnets/${subnet.id}/export`" class="btn-secondary text-sm">Export CSV</a>
       </div>
     </div>
@@ -65,5 +76,6 @@ async function saveNotes(ipId: number, notes: string) {
       </table>
     </div>
     <IpHistoryModal :ip="historyIp" @close="historyIp = null" />
+    <DhcpModal :open="showDhcp" :subnet-id="subnet.id" @close="showDhcp = false" @saved="loadSubnet" />
   </div>
 </template>
