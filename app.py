@@ -38,7 +38,7 @@ app.config['MYSQL_DATABASE'] = os.environ.get('MYSQL_DATABASE', 'ipam')
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['NAME'] = os.environ.get('NAME', 'JDB-NET')
-app.config['LOGO_PNG'] = os.environ.get('LOGO_PNG', 'https://assets.jdbnet.co.uk/logo/128x128.png')
+app.config['LOGO_PNG'] = os.environ.get('LOGO_PNG', 'https://assets.jdbnet.co.uk/projects/ipam.png')
 app.config['VERSION'] = os.environ.get('VERSION', 'unknown')
 
 from db import init_db, hash_password, get_db_connection, verify_password, generate_api_key

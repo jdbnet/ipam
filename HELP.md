@@ -1,0 +1,229 @@
+## Configuration
+
+### Environment Variables
+
+- `MYSQL_HOST`: MySQL/MariaDB host (default: localhost)
+- `MYSQL_USER`: Database user (default: user)
+- `MYSQL_PASSWORD`: Database password (default: password)
+- `MYSQL_DATABASE`: Database name (default: ipam)
+- `SECRET_KEY`: Flask secret key for sessions (**REQUIRED in production!**)
+- `NAME`: Organisation name displayed in header (default: JDB-NET)
+- `LOGO_PNG`: URL or path to organisation logo (default: JDB-NET logo)
+
+### Database Setup
+
+The application automatically initializes the database schema on first run. Ensure the database and user exist with appropriate 
+permissions:
+
+```sql
+CREATE DATABASE ipam;
+CREATE USER 'ipam'@'%' IDENTIFIED BY 'your_password';
+GRANT ALL PRIVILEGES ON ipam.* TO 'ipam'@'%';
+FLUSH PRIVILEGES;
+```
+
+### Upgrading from v1.x
+
+See [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md) for removed features, route changes, and automatic database migrations. 
+Back up your database before upgrading.
+
+## Usage
+
+### First Login
+
+1. Access the web interface at `http://your-server:5000`
+2. Log in with the default credentials:
+   - Email: `admin@example.com`
+   - Password: `password`
+3. **Change the default password immediately** via the Users page
+
+### Managing Subnets
+
+1. Navigate to **Subnet Management** from the main menu (`/subnets/manage`)
+2. Click **Add Subnet** and fill in:
+   - **Name**: Friendly name for the subnet (e.g., "Office LAN")
+   - **CIDR**: Subnet in CIDR notation (e.g., `192.168.1.0/24`)
+   - **Site**: Site/location identifier
+3. The system automatically generates all IP addresses in the subnet
+
+### Adding Devices
+
+1. Navigate to "Devices" from the main menu
+2. Click "Add Device"
+3. Enter device name (and optional description)
+4. Click "Create Device"
+
+### Assigning IP Addresses to Devices
+
+1. Open a device from the Devices page
+2. Select a subnet and available IP address
+3. Click "Assign IP" - the hostname is automatically updated
+
+### Configuring DHCP Pools
+
+1. Open a subnet from the dashboard or subnet list
+2. Click **DHCP** to open the DHCP pool modal
+3. Set the start and end IP addresses
+4. Optionally specify excluded IPs (comma-separated)
+5. IPs within the pool range are automatically marked as "DHCP"
+
+### Managing Racks
+
+1. Navigate to "Racks" from the main menu
+2. Click "Add Rack" and specify:
+   - **Name**: Rack identifier
+   - **Site**: Site location
+   - **Height**: Rack height in U units
+3. Open a rack to assign devices to specific U positions (front or back)
+
+### Device Tagging
+
+1. **Managing Tags** (requires `add_tag` / `edit_tag` / `delete_tag` permissions):
+   - Navigate to **Tags** from the main menu
+   - Create tags with custom colours and descriptions
+   - Edit or delete existing tags as permitted by your role
+
+2. **Assigning Tags to Devices**:
+   - Open any device from the Devices page
+   - Use the tag assignment dropdown to add multiple tags
+   - Remove tags by clicking the × button next to the tag name
+
+3. **Filtering by Tags**:
+   - Use the tag filter dropdown on the Devices page to view devices with specific tags
+   - Tags appear as colored badges throughout the interface for easy identification
+
+### Audit Log
+
+View changes in **Audit Log**. Filter by user name, action type, and date range. Export filtered results to CSV.
+
+### Exporting Data
+
+- **Subnet CSV**: Click "Export CSV" on any subnet page to download IP addresses with hostnames
+- **Rack CSV**: Click "Export CSV" on any rack page to download rack layout information
+
+### Role-Based Access Control
+
+The system uses a granular role-based access control (RBAC) system to manage user permissions:
+
+1. **Default Roles**:
+   - **Admin**: Full access to all features including user and role management
+   - **User**: Can view and manage most features (devices, subnets, racks, etc.) but cannot manage users or roles
+   - **View Only**: Read-only access to view pages but cannot make any changes
+
+2. **Custom Roles**: Administrators can create custom roles with specific permission sets from the Users page
+
+3. **Permission Granularity**: Permissions are organized into categories:
+   - View permissions (access to pages)
+   - Device Management (add, edit, delete devices)
+   - Network Management (subnet operations)
+   - Rack Management (rack operations)
+   - DHCP Configuration
+   - Administration (user and role management)
+
+4. **User Management**: Navigate to the Users page to:
+   - Create and manage users
+   - Assign roles to users
+   - Create custom roles with specific permissions
+   - View and regenerate API keys
+
+### REST API
+
+Programmatic access uses **`/api/v2`**. The browser SPA uses session cookies; automation uses API keys via:
+
+- `X-API-Key` header
+- `Authorization: Bearer <api_key>` header
+- `?api_key=<api_key>` query parameter
+
+Each user has an API key (view/regenerate on the Users page). Keys respect the same RBAC permissions as the web UI.
+
+Full endpoint reference: [API.md](API.md)
+
+```bash
+# List devices
+curl -H "X-API-Key: YOUR_KEY" https://your-server:5000/api/v2/devices
+
+# Session login (browser-style)
+curl -c cookies.txt -X POST -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"password"}' \
+  https://your-server:5000/api/v2/auth/login
+```
+
+## Kubernetes Deployment
+
+Example deployment manifest:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ipam
+  namespace: ipam
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: ipam
+        image: cr.jdbnet.co.uk/public/ipam:latest
+        ports:
+        - containerPort: 5000
+        env:
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ipam-secrets
+              key: secret-key
+        - name: MYSQL_HOST
+          value: "mysql-service"
+        - name: MYSQL_USER
+          value: "ipam"
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ipam-secrets
+              key: mysql-password
+        - name: MYSQL_DATABASE
+          value: "ipam"
+```
+
+## Security Notes
+
+- **CHANGE THE DEFAULT ADMIN PASSWORD** immediately after first login
+- **CHANGE THE SECRET_KEY** in production - use a strong random string (e.g., `openssl rand -hex 32`)
+- Use strong passwords for database access
+- Ensure database connections are secured (consider SSL/TLS for MySQL connections)
+- Review audit logs regularly for unauthorized changes
+- Limit database user permissions if possible (though CREATE/ALTER may be needed for schema initialization)
+- **API Keys**: Keep API keys secure and never share them publicly. Regenerate keys if they may have been compromised
+- **Role-Based Access**: Use the RBAC system to grant users only the permissions they need (principle of least privilege)
+- **HTTPS**: Use HTTPS in production to protect API keys and session data in transit
+
+## Troubleshooting
+
+### Database Connection Issues
+
+- Ensure MySQL/MariaDB is running and accessible from the container
+- Check database credentials in environment variables
+- Verify database and user exist with proper permissions
+- Check network connectivity between container and database
+- Ensure the database name matches exactly (case-sensitive on some systems)
+
+### Application Not Starting
+
+- Check container logs: `docker logs ipam`
+- Verify all required environment variables are set
+- Ensure port 5000 is not already in use
+- Check that MySQL/MariaDB is reachable
+
+### Subnet or IP Not Appearing
+
+- Verify CIDR notation is correct (supports /24 to /32)
+- Check subnet was created successfully (Subnet Management page)
+- Ensure you're logged in with appropriate permissions
+- Check application logs for errors
+
+### Device IP Assignment Issues
+
+- Verify the IP address is available (not already assigned)
+- Check that the IP is not in a DHCP pool range
+- Ensure the device exists and is visible in the Devices list
