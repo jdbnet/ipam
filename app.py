@@ -19,9 +19,10 @@ import qrcode
 import mysql.connector
 from dotenv import load_dotenv
 from flask import (
-    Flask, session, request, redirect, url_for, abort, jsonify,
-    render_template, send_from_directory, send_file, current_app,
+    Flask, session, request, abort, jsonify, redirect,
+    send_from_directory, send_file, current_app,
 )
+from werkzeug.utils import safe_join
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv()
@@ -34,6 +35,11 @@ app.config['MYSQL_HOST'] = os.environ.get('MYSQL_HOST', 'localhost')
 app.config['MYSQL_USER'] = os.environ.get('MYSQL_USER', 'user')
 app.config['MYSQL_PASSWORD'] = os.environ.get('MYSQL_PASSWORD', 'password')
 app.config['MYSQL_DATABASE'] = os.environ.get('MYSQL_DATABASE', 'ipam')
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['NAME'] = os.environ.get('NAME', 'JDB-NET')
+app.config['LOGO_PNG'] = os.environ.get('LOGO_PNG', 'https://assets.jdbnet.co.uk/logo/128x128.png')
+app.config['VERSION'] = os.environ.get('VERSION', 'unknown')
 
 from db import init_db, hash_password, get_db_connection, verify_password, generate_api_key
 
@@ -102,13 +108,16 @@ def format_backup_codes(codes):
 
 # ── Auth & permissions ────────────────────────────────────────────────────────
 
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
+def _api_key_from_request():
+    if 'X-API-Key' in request.headers:
+        return request.headers['X-API-Key']
+    if 'api_key' in request.args:
+        return request.args.get('api_key')
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        return auth_header[7:]
+    return None
+
 
 def load_permissions_for_user(user_id, conn):
     """Return the set of permission names granted to a user via their role."""
@@ -125,6 +134,27 @@ def load_permissions_for_user(user_id, conn):
     return {row[0] for row in cursor.fetchall()}
 
 
+def _user_record_from_row(row, conn):
+    user = {
+        'id': row[0],
+        'name': row[1],
+        'email': row[2],
+        'role_id': row[3],
+    }
+    user['permissions'] = load_permissions_for_user(user['id'], conn)
+    return user
+
+
+def get_user_from_api_key(api_key):
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name, email, role_id FROM User WHERE api_key = %s', (api_key,))
+        result = cursor.fetchone()
+        if result:
+            return _user_record_from_row(result, conn)
+    return None
+
+
 def establish_user_session(user_id, conn=None):
     """Populate session after successful authentication."""
     close_conn = False
@@ -133,9 +163,10 @@ def establish_user_session(user_id, conn=None):
         close_conn = True
     try:
         cursor = conn.cursor()
-        cursor.execute('SELECT name FROM User WHERE id = %s', (user_id,))
+        cursor.execute('SELECT name, email FROM User WHERE id = %s', (user_id,))
         row = cursor.fetchone()
         session['user_name'] = row[0] if row else ''
+        session['user_email'] = row[1] if row else ''
         session['permissions'] = list(load_permissions_for_user(user_id, conn))
         session['logged_in'] = True
         session['user_id'] = user_id
@@ -145,126 +176,92 @@ def establish_user_session(user_id, conn=None):
             conn.close()
 
 
-def has_permission(permission_name, user_id=None, conn=None):
-    """Check if a user has a specific permission."""
-    if user_id is None:
-        user_id = session.get('user_id')
-    if not user_id:
-        return False
-
-    if user_id == session.get('user_id') and 'permissions' in session:
-        return permission_name in session['permissions']
-
-    api_user = getattr(request, 'api_user', None)
-    if api_user and api_user.get('id') == user_id and 'permissions' in api_user:
-        return permission_name in api_user['permissions']
-
-    close_conn = False
-    if conn is None:
-        conn = get_db_connection(current_app)
-        close_conn = True
-
-    try:
-        return permission_name in load_permissions_for_user(user_id, conn)
-    finally:
-        if close_conn:
-            conn.close()
-
-def permission_required(permission_name):
-    """Decorator to require a specific permission"""
-    def decorator(f):
-        @wraps(f)
-        @login_required
-        def decorated_function(*args, **kwargs):
-            if not has_permission(permission_name):
-                abort(403)
-            return f(*args, **kwargs)
-        return decorated_function
-    return decorator
-
-
-def get_user_from_api_key(api_key):
-    """Get user from API key"""
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, email, role_id FROM User WHERE api_key = %s', (api_key,))
-        result = cursor.fetchone()
-        if result:
-            user = {
-                'id': result[0],
-                'name': result[1],
-                'email': result[2],
-                'role_id': result[3],
-            }
-            user['permissions'] = load_permissions_for_user(user['id'], conn)
+def resolve_auth():
+    """Return authenticated user dict or None (session or API key)."""
+    if session.get('logged_in') and session.get('user_id'):
+        return {
+            'id': session['user_id'],
+            'name': session.get('user_name', ''),
+            'email': session.get('user_email', ''),
+            'permissions': set(session.get('permissions', [])),
+            'auth_type': 'session',
+        }
+    api_key = _api_key_from_request()
+    if api_key:
+        user = get_user_from_api_key(api_key)
+        if user:
+            user['auth_type'] = 'api_key'
             return user
     return None
 
-def api_auth_required(f):
-    """Decorator for API authentication using API key"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        api_key = None
-        # Check for API key in header
-        if 'X-API-Key' in request.headers:
-            api_key = request.headers['X-API-Key']
-        # Check for API key in query parameter
-        elif 'api_key' in request.args:
-            api_key = request.args.get('api_key')
-        # Check for API key in Authorization header (Bearer token)
-        elif 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            if auth_header.startswith('Bearer '):
-                api_key = auth_header[7:]
-        
-        if not api_key:
-            return jsonify({'error': 'API key required'}), 401
-        
-        user = get_user_from_api_key(api_key)
-        if not user:
-            return jsonify({'error': 'Invalid API key'}), 401
-        
-        # Store user info in request context
-        request.api_user = user
-        
-        # Execute the function
-        response = f(*args, **kwargs)
-        
-        # Log mutating API calls only (GET traffic was dominating audit volume)
-        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
-            try:
-                status_code = None
-                if hasattr(response, 'status_code'):
-                    status_code = response.status_code
-                elif isinstance(response, tuple) and len(response) > 1:
-                    status_code = response[1]
-                details = f"API call: {request.method} {request.path}"
-                if status_code:
-                    details += f" (Status: {status_code})"
-                add_audit_log(
-                    user_id=user['id'],
-                    action='api_usage',
-                    details=details,
-                    subnet_id=None,
-                )
-            except Exception as e:
-                logging.error(f"Failed to log API usage: {e}")
-        
-        return response
-    return decorated_function
 
-def api_permission_required(permission_name):
-    """Decorator to require a specific permission for API endpoints"""
+def current_user():
+    return getattr(request, 'current_user', None)
+
+
+def has_permission(permission_name, user=None):
+    user = user or current_user()
+    if not user:
+        return False
+    perms = user.get('permissions')
+    if isinstance(perms, set):
+        return permission_name in perms
+    if isinstance(perms, list):
+        return permission_name in perms
+    return False
+
+
+def require_permission(permission_name):
+    """Decorator: session cookie or API key; enforces RBAC permission."""
     def decorator(f):
         @wraps(f)
-        @api_auth_required
         def decorated_function(*args, **kwargs):
-            if not has_permission(permission_name, user_id=request.api_user['id']):
-                return jsonify({'error': 'Permission denied'}), 403
-            return f(*args, **kwargs)
+            user = resolve_auth()
+            if not user:
+                return jsonify({'error': 'Unauthorized'}), 401
+            if permission_name and not has_permission(permission_name, user):
+                return jsonify({'error': 'Permission denied', 'permission': permission_name}), 403
+            request.current_user = user
+            response = f(*args, **kwargs)
+            if user.get('auth_type') == 'api_key' and request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+                try:
+                    status_code = response.status_code if hasattr(response, 'status_code') else (
+                        response[1] if isinstance(response, tuple) and len(response) > 1 else None
+                    )
+                    details = f"API call: {request.method} {request.path}"
+                    if status_code:
+                        details += f" (Status: {status_code})"
+                    add_audit_log(user['id'], 'api_usage', details, subnet_id=None)
+                except Exception as e:
+                    logging.error(f"Failed to log API usage: {e}")
+            return response
         return decorated_function
     return decorator
+
+
+def require_auth(f):
+    """Decorator: authenticated only (no specific permission)."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = resolve_auth()
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+        request.current_user = user
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def json_body():
+    return request.get_json(silent=True) or {}
+
+
+def items_response(items):
+    return jsonify({'items': items})
+
+
+def get_current_user_id():
+    user = current_user()
+    return user['id'] if user else session.get('user_id')
 
 def add_audit_log(user_id, action, details=None, subnet_id=None, conn=None):
     import datetime
@@ -642,13 +639,22 @@ def get_all_subnet_utilizations(cursor):
         GROUP BY ip.subnet_id
     ''')
     result = {}
-    for subnet_id, total, assigned, dhcp in cursor.fetchall():
-        used = int(assigned) + int(dhcp)
-        total = int(total)
+    for row in cursor.fetchall():
+        if isinstance(row, dict):
+            subnet_id = row['subnet_id']
+            total = int(row['total'])
+            assigned = int(row['assigned'])
+            dhcp = int(row['dhcp'])
+        else:
+            subnet_id, total, assigned, dhcp = row
+            total = int(total)
+            assigned = int(assigned)
+            dhcp = int(dhcp)
+        used = assigned + dhcp
         result[subnet_id] = {
             'total': total,
-            'assigned': int(assigned),
-            'dhcp': int(dhcp),
+            'assigned': assigned,
+            'dhcp': dhcp,
             'used': used,
             'percent': round((used / total * 100) if total > 0 else 0, 1),
         }
@@ -718,6 +724,10 @@ def get_device_name(cursor, device_id):
     return row[0] if row else None
 
 
+def normalize_site(site):
+    return site if site else 'Unassigned'
+
+
 def assign_ip_to_device(conn, device_id, ip_id, user_id):
     """Assign an IP to a device. Raises ValueError on failure."""
     cursor = conn.cursor()
@@ -726,6 +736,30 @@ def assign_ip_to_device(conn, device_id, ip_id, user_id):
     if not ip_row:
         raise ValueError('IP not found')
     ip, subnet_id = ip_row[0], ip_row[1]
+
+    cursor.execute('SELECT site FROM Subnet WHERE id = %s', (subnet_id,))
+    subnet_row = cursor.fetchone()
+    if not subnet_row:
+        raise ValueError('Subnet not found')
+    new_site = normalize_site(subnet_row[0])
+
+    cursor.execute('''
+        SELECT DISTINCT s.site
+        FROM DeviceIPAddress dia
+        JOIN IPAddress ip ON dia.ip_id = ip.id
+        JOIN Subnet s ON ip.subnet_id = s.id
+        WHERE dia.device_id = %s
+    ''', (device_id,))
+    existing_sites = {normalize_site(row[0]) for row in cursor.fetchall()}
+    if existing_sites and new_site not in existing_sites:
+        if len(existing_sites) == 1:
+            home = next(iter(existing_sites))
+            raise ValueError(
+                f'Device is homed at site "{home}"; cannot assign an IP from site "{new_site}"'
+            )
+        raise ValueError(
+            f'Device already has IPs at other sites; cannot assign an IP from site "{new_site}"'
+        )
 
     cursor.execute('SELECT id FROM DeviceIPAddress WHERE ip_id = %s', (ip_id,))
     if cursor.fetchone():
@@ -946,7 +980,10 @@ def update_entity_custom_fields(conn, entity_type, entity_id, submitted_data, us
     new_values = {}
     errors = []
     for field_key, field_def in field_defs.items():
-        submitted_value = submitted_data.get(f'custom_field_{field_key}', '')
+        if is_json:
+            submitted_value = submitted_data.get(field_key, '')
+        else:
+            submitted_value = submitted_data.get(f'custom_field_{field_key}', '')
         validation_rules = field_def.get('validation_rules')
         if isinstance(validation_rules, str):
             try:
@@ -993,46 +1030,6 @@ def build_validation_rules_from_form(form, field_type=None):
     return json.dumps(rules) if rules else None
 
 
-def process_2fa_setup_request(request, user_id, template_name, complete_login=False):
-    """Handle generate/verify steps for 2FA setup. Returns a Flask response."""
-    if request.method != 'POST':
-        return render_with_user(template_name, step='generate')
-    action = request.form.get('action')
-    if action == 'generate':
-        secret = generate_totp_secret()
-        session['temp_totp_secret'] = secret
-        with get_db_connection(current_app) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT email FROM User WHERE id = %s', (user_id,))
-            email = cursor.fetchone()[0]
-        totp_uri = get_totp_uri(secret, email)
-        qr_code = generate_qr_code(totp_uri)
-        return render_with_user(template_name, secret=secret, qr_code=qr_code, email=email, step='verify')
-    if action == 'verify':
-        code = request.form.get('code', '').strip()
-        secret = session.get('temp_totp_secret')
-        if not secret:
-            return render_with_user(template_name, error='Session expired. Please start over.', step='generate')
-        if not verify_totp(secret, code):
-            return render_with_user(template_name, error='Invalid code. Please try again.', secret=secret, step='verify')
-        backup_codes = generate_backup_codes()
-        backup_codes_json = json.dumps(backup_codes)
-        with get_db_connection(current_app) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE User SET totp_secret = %s, totp_enabled = TRUE, backup_codes = %s, two_fa_setup_complete = TRUE
-                WHERE id = %s
-            ''', (secret, backup_codes_json, user_id))
-        session.pop('temp_totp_secret', None)
-        if complete_login:
-            establish_user_session(user_id)
-            session.pop('pending_user_id', None)
-            session.pop('pending_email', None)
-        logging.info(f"User {user_id} enabled 2FA successfully.")
-        return render_with_user(template_name, backup_codes=format_backup_codes(backup_codes), step='backup_codes')
-    return render_with_user(template_name, step='generate')
-
-
 def load_rack_view(conn, rack_id, side='front', networked_only=True):
     """Load rack page context: rack dict, rack_devices, site_devices."""
     cursor = conn.cursor(dictionary=True)
@@ -1056,25 +1053,74 @@ def load_rack_view(conn, rack_id, side='front', networked_only=True):
             rd['device_name'] = rd['nonnet_device_name']
     if networked_only:
         cursor.execute('''
-            SELECT DISTINCT Device.id, Device.name, Device.device_type_id, Device.description
+            SELECT DISTINCT Device.id, Device.name, Device.description
             FROM Device JOIN DeviceIPAddress ON Device.id = DeviceIPAddress.device_id
             JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id
             JOIN Subnet ON IPAddress.subnet_id = Subnet.id
-            WHERE Device.device_type_id NOT IN (2, 6) AND Subnet.site = %s
+            WHERE Subnet.site = %s
         ''', (rack['site'],))
     else:
-        cursor.execute('SELECT id, name, device_type_id, description FROM Device WHERE device_type_id NOT IN (2, 6)')
+        cursor.execute('SELECT id, name, description FROM Device')
     site_devices = cursor.fetchall()
     return {'rack': rack, 'rack_devices': rack_devices, 'site_devices': site_devices, 'current_side': side}
 
 
-def render_rack_page(conn, rack_id, side, error=None):
-    ctx = load_rack_view(conn, rack_id, side)
-    if not ctx:
-        return 'Rack not found', 404
-    if error:
-        ctx['error'] = error
-    return render_with_user('rack.html', **ctx)
+def enrich_devices_batch(cursor, devices):
+    """Attach ip_addresses, tags, custom_fields to device dicts in batch."""
+    if not devices:
+        return devices
+    device_ids = [d['id'] for d in devices]
+    placeholders = ','.join(['%s'] * len(device_ids))
+
+    cursor.execute(f'''
+        SELECT dia.device_id, ip.id, ip.ip, ip.hostname, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
+        FROM DeviceIPAddress dia
+        JOIN IPAddress ip ON dia.ip_id = ip.id
+        JOIN Subnet s ON ip.subnet_id = s.id
+        WHERE dia.device_id IN ({placeholders})
+    ''', tuple(device_ids))
+    ips_by_device = {}
+    for row in cursor.fetchall():
+        ips_by_device.setdefault(row['device_id'], []).append(row)
+
+    cursor.execute(f'''
+        SELECT dt.device_id, t.id, t.name, t.color
+        FROM DeviceTag dt JOIN Tag t ON dt.tag_id = t.id
+        WHERE dt.device_id IN ({placeholders}) ORDER BY t.name
+    ''', tuple(device_ids))
+    tags_by_device = {}
+    for row in cursor.fetchall():
+        tags_by_device.setdefault(row['device_id'], []).append(
+            {'id': row['id'], 'name': row['name'], 'color': row['color']}
+        )
+
+    cursor.execute(f'SELECT id, custom_fields FROM Device WHERE id IN ({placeholders})', tuple(device_ids))
+    cf_by_id = {}
+    for row in cursor.fetchall():
+        cf = row['custom_fields']
+        if cf:
+            try:
+                cf_by_id[row['id']] = json.loads(cf)
+            except (json.JSONDecodeError, TypeError):
+                cf_by_id[row['id']] = {}
+        else:
+            cf_by_id[row['id']] = {}
+
+    for device in devices:
+        did = device['id']
+        device['ip_addresses'] = ips_by_device.get(did, [])
+        device['tags'] = tags_by_device.get(did, [])
+        device['custom_fields'] = cf_by_id.get(did, {})
+    return devices
+
+
+def parse_custom_fields_json(raw):
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 def fetch_subnet_ip_rows(cursor, subnet_id):
@@ -1143,1851 +1189,295 @@ def group_devices_by_site(devices):
         sites.setdefault(site, []).append(device)
     return sites
 
-# ── Template & context helpers ───────────────────────────────────────────────
-def get_current_user_name():
-    if session.get('user_name'):
-        return session['user_name']
-    user_id = session.get('user_id')
-    if not user_id:
-        return ''
+
+# ── Auth & account (v2) ───────────────────────────────────────────────────────
+
+@app.route('/api/v2/auth/login', methods=['POST'])
+def api_auth_login():
+    data = json_body()
+    email = (data.get('email') or '').strip()
+    password = data.get('password') or ''
+    if not email or not password:
+        return jsonify({'error': 'Email and password required'}), 400
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT name FROM User WHERE id = %s', (user_id,))
-        row = cursor.fetchone()
-        name = row[0] if row else ''
-        session['user_name'] = name
-        return name
-
-def render_with_user(*args, **kwargs):
-    if 'current_user_name' not in kwargs:
-        kwargs['current_user_name'] = get_current_user_name()
-    return render_template(*args, **kwargs)
-
-# ── Routes ────────────────────────────────────────────────────────────────────
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    # If already logged in, redirect to index
-    if session.get('logged_in'):
-        return redirect(url_for('index'))
-    
-    error = None
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        from flask import current_app
-        with get_db_connection(current_app) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT id, password FROM User WHERE email = %s', (email,))
-            user = cursor.fetchone()
-        if user and verify_password(password, user[1]):
-            user_id = user[0]
-            # Check if user's role requires 2FA
-            with get_db_connection(current_app) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT u.totp_enabled, u.two_fa_setup_complete, r.require_2fa
-                    FROM User u
-                    LEFT JOIN Role r ON u.role_id = r.id
-                    WHERE u.id = %s
-                ''', (user_id,))
-                result = cursor.fetchone()
-                totp_enabled = result[0] if result else False
-                setup_complete = result[1] if result else False
-                role_requires_2fa = result[2] if result else False
-            
-            # If role requires 2FA but user hasn't set it up, redirect to setup
-            if role_requires_2fa and not setup_complete:
-                session['pending_user_id'] = user_id
-                session['pending_email'] = email
-                return redirect(url_for('setup_2fa'))
-            
-            # If 2FA is enabled, require verification
-            if totp_enabled:
-                session['pending_user_id'] = user_id
-                session['pending_email'] = email
-                return redirect(url_for('verify_2fa'))
-            
-            # Normal login - no 2FA required
-            with get_db_connection(current_app) as conn:
-                establish_user_session(user_id, conn=conn)
-            logging.info(f"User {email} logged in successfully.")
-            return redirect(url_for('index'))
-        else:
+        cursor.execute('SELECT id, password FROM User WHERE email = %s', (email,))
+        user = cursor.fetchone()
+        if not user or not verify_password(password, user[1]):
             logging.info(f"Failed login attempt for email: {email}")
-            error = 'Invalid email or password.'
-    return render_with_user('login.html', error=error)
-
-@app.route('/logout')
-def logout():
-    user_name = get_current_user_name()
-    logging.info(f"User {user_name} logged out.")
-    session.clear()
-    return redirect(url_for('login'))
-
-@app.route('/setup-2fa', methods=['GET', 'POST'])
-def setup_2fa():
-    if session.get('logged_in'):
-        return redirect(url_for('index'))
-    pending_user_id = session.get('pending_user_id')
-    if not pending_user_id:
-        return redirect(url_for('login'))
-    return process_2fa_setup_request(request, pending_user_id, 'setup_2fa.html', complete_login=True)
-
-@app.route('/verify-2fa', methods=['GET', 'POST'])
-def verify_2fa():
-    from flask import current_app
-    
-    # If already logged in, redirect to index
-    if session.get('logged_in'):
-        return redirect(url_for('index'))
-    
-    pending_user_id = session.get('pending_user_id')
-    if not pending_user_id:
-        return redirect(url_for('login'))
-    
-    if request.method == 'POST':
-        code = request.form.get('code', '').strip()
-        use_backup = request.form.get('use_backup') == 'true'
-        
-        if not code:
-            return render_with_user('verify_2fa.html', error='Please enter a verification code.')
-        
-        with get_db_connection(current_app) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT totp_secret, backup_codes FROM User WHERE id = %s', (pending_user_id,))
-            result = cursor.fetchone()
-            if not result:
-                return render_with_user('verify_2fa.html', error='User not found.')
-            
-            totp_secret, backup_codes_json = result
-            
-            # CRITICAL: Ensure TOTP secret exists before attempting verification
-            if not totp_secret:
-                return render_with_user('verify_2fa.html', error='2FA is not properly configured for this account.')
-            
-            if use_backup:
-                # Verify backup code
-                if not backup_codes_json:
-                    return render_with_user('verify_2fa.html', error='No backup codes available.')
-                
-                valid, updated_codes = verify_backup_code(backup_codes_json, code)
-                if valid:
-                    # Update backup codes in database
-                    cursor.execute('UPDATE User SET backup_codes = %s WHERE id = %s', 
-                                 (updated_codes, pending_user_id))
-                    conn.commit()
-                    establish_user_session(pending_user_id, conn=conn)
-                    session.pop('pending_user_id', None)
-                    session.pop('pending_email', None)
-                    logging.info(f"User {pending_user_id} logged in with backup code.")
-                    return redirect(url_for('index'))
-                else:
-                    return render_with_user('verify_2fa.html', error='Invalid backup code.')
-            else:
-                # Verify TOTP code - ensure code is exactly 6 digits
-                if len(code) != 6 or not code.isdigit():
-                    return render_with_user('verify_2fa.html', error='Invalid code format. Please enter a 6-digit code.')
-                
-                if verify_totp(totp_secret, code):
-                    establish_user_session(pending_user_id, conn=conn)
-                    session.pop('pending_user_id', None)
-                    session.pop('pending_email', None)
-                    logging.info(f"User {pending_user_id} logged in with 2FA.")
-                    return redirect(url_for('index'))
-                else:
-                    return render_with_user('verify_2fa.html', error='Invalid code. Please try again.')
-    
-    return render_with_user('verify_2fa.html')
-
-@app.route('/')
-@permission_required('view_index')
-def index():
-    from flask import current_app
-    conn = get_db_connection(current_app)
-    try:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet')
-        subnets = cursor.fetchall()
-        utilizations = get_all_subnet_utilizations(cursor)
-        sites_subnets = {}
-        for subnet in subnets:
-            site = subnet[3] or 'Unassigned'
-            if site not in sites_subnets:
-                sites_subnets[site] = []
-
-            subnet_id = subnet[0]
-            util = utilizations.get(subnet_id, {'percent': 0})
-            sites_subnets[site].append({
-                'id': subnet[0],
-                'name': subnet[1],
-                'cidr': subnet[2],
-                'vlan_id': subnet[4],
-                'utilization': util['percent']
-            })
-        return render_with_user('index.html', sites_subnets=sites_subnets)
-    finally:
-        conn.close()
-
-@app.route('/devices')
-@permission_required('view_devices')
-def devices():
-    from flask import current_app
-    tag_filter = request.args.get('tag')
-    
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        
-        # Base device query
-        if tag_filter:
-            cursor.execute('''
-                SELECT DISTINCT d.id, d.name, dt.icon_class 
-                FROM Device d 
-                LEFT JOIN DeviceType dt ON d.device_type_id = dt.id
-                JOIN DeviceTag dtag ON d.id = dtag.device_id
-                JOIN Tag t ON dtag.tag_id = t.id
-                WHERE t.name = %s
-                ORDER BY d.name
-            ''', (tag_filter,))
-        else:
-            cursor.execute('''SELECT Device.id, Device.name, DeviceType.icon_class FROM Device LEFT JOIN DeviceType ON Device.device_type_id = DeviceType.id ORDER BY Device.name''')
-        
-        devices = cursor.fetchall()
-        
-        cursor.execute('SELECT id, name, cidr, site FROM Subnet')
-        subnets = cursor.fetchall()
-        cursor.execute('SELECT DeviceIPAddress.device_id, IPAddress.id, IPAddress.ip FROM DeviceIPAddress JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id')
-        device_ips = {}
-        for row in cursor.fetchall():
-            device_ips.setdefault(row[0], []).append((row[1], row[2]))
-        
-        # Get tags for all devices in one query
-        device_tags = {}
-        if devices:
-            device_ids = [device[0] for device in devices]
-            placeholders = ','.join(['%s'] * len(device_ids))
-            cursor.execute(f'''
-                SELECT dt.device_id, t.id, t.name, t.color
-                FROM DeviceTag dt
-                JOIN Tag t ON dt.tag_id = t.id
-                WHERE dt.device_id IN ({placeholders})
-                ORDER BY t.name
-            ''', tuple(device_ids))
-            for row in cursor.fetchall():
-                device_tags.setdefault(row[0], []).append({'id': row[1], 'name': row[2], 'color': row[3]})
-        
-        cursor.execute('SELECT DISTINCT name FROM Tag ORDER BY name')
-        all_tag_names = [row[0] for row in cursor.fetchall()]
-        
-        # Optimize: Get device sites in a single query instead of N+1
-        sites_devices = {}
-        device_sites = {}
-        if devices:
-            device_ids = [device[0] for device in devices]
-            placeholders = ','.join(['%s'] * len(device_ids))
-            cursor.execute(f'''
-                SELECT DISTINCT DeviceIPAddress.device_id, Subnet.site
-                FROM DeviceIPAddress
-                JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id
-                JOIN Subnet ON IPAddress.subnet_id = Subnet.id
-                WHERE DeviceIPAddress.device_id IN ({placeholders})
-            ''', tuple(device_ids))
-            for row in cursor.fetchall():
-                device_sites[row[0]] = row[1] or 'Unassigned'
-        
-        for device in devices:
-            site = device_sites.get(device[0], 'Unassigned')
-            if site not in sites_devices:
-                sites_devices[site] = []
-            sites_devices[site].append({'id': device[0], 'name': device[1], 'icon_class': device[2]})
-    
-    return render_with_user('devices.html', sites_devices=sites_devices, device_ips=device_ips, 
-                           device_tags=device_tags, all_tag_names=all_tag_names, 
-                           current_tag_filter=tag_filter)
-
-@app.route('/add_device', methods=['GET', 'POST'])
-@permission_required('add_device')
-def add_device():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name FROM DeviceType ORDER BY name')
-        device_types = cursor.fetchall()
-    if request.method == 'POST':
-        name = request.form['device_name']
-        device_type_id = int(request.form['device_type'])
-        user_name = get_current_user_name()
-        with get_db_connection(current_app) as conn:
-            cursor = conn.cursor()
-            cursor.execute('INSERT INTO Device (name, device_type_id) VALUES (%s, %s)', (name, device_type_id))
-            conn.commit()
-        logging.info(f"User {user_name} added device '{name}' (type {device_type_id}).")
-        return redirect(url_for('devices'))
-    return render_with_user('add_device.html', device_types=device_types)
-
-@app.route('/device/<int:device_id>')
-@permission_required('view_device')
-def device(device_id):
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, description, device_type_id FROM Device WHERE id = %s', (device_id,))
-        device = cursor.fetchone()
-        if not device:
-            # Device doesn't exist, redirect to devices page
-            return redirect(url_for('devices'))
-        
-        cursor.execute('SELECT id, name FROM DeviceType ORDER BY name')
-        device_types = cursor.fetchall()
-        cursor.execute('SELECT id, name, cidr, site FROM Subnet')
-        subnets = [dict(id=row[0], name=row[1], cidr=row[2], site=row[3]) for row in cursor.fetchall()]
-        cursor.execute('''SELECT DeviceIPAddress.id as device_ip_id, IPAddress.ip FROM DeviceIPAddress JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id WHERE DeviceIPAddress.device_id = %s''', (device_id,))
-        device_ips = [{'device_ip_id': row[0], 'ip': row[1]} for row in cursor.fetchall()]
-        
-        # Get device tags
+            return jsonify({'error': 'Invalid email or password'}), 401
+        user_id = user[0]
         cursor.execute('''
-            SELECT t.id, t.name, t.color
-            FROM DeviceTag dt
-            JOIN Tag t ON dt.tag_id = t.id
-            WHERE dt.device_id = %s
-            ORDER BY t.name
-        ''', (device_id,))
-        device_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
-        
-        cursor.execute('SELECT id, name, color FROM Tag ORDER BY name')
-        all_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
-
-        cursor.execute('''
-            SELECT ip.subnet_id, ip.id, ip.ip
-            FROM IPAddress ip
-            LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-            WHERE dia.ip_id IS NULL
-            ORDER BY ip.subnet_id, INET_ATON(ip.ip)
-        ''')
-        unassigned_by_subnet = {}
-        for row in cursor.fetchall():
-            unassigned_by_subnet.setdefault(row[0], []).append({'id': row[1], 'ip': row[2]})
-
-        available_ips_by_subnet = {}
-        for subnet in subnets:
-            ips = unassigned_by_subnet.get(subnet['id'], [])
-            available_ips_by_subnet[subnet['id']] = filter_ips_outside_dhcp(cursor, subnet['id'], ips)
-        
-        # Get custom fields for device
-        custom_fields = get_custom_fields_for_entity('device', device_id, conn=conn)
-        
-        # Get IP history for this device
-        ip_history = get_ip_history_from_audit_logs(device_id=device_id, conn=conn)
-    
-    return render_with_user('device.html', 
-                           device={'id': device[0], 'name': device[1], 'description': device[2], 'device_type_id': device[3]}, 
-                           subnets=subnets, device_ips=device_ips, available_ips_by_subnet=available_ips_by_subnet, 
-                           device_types=device_types, device_tags=device_tags, all_tags=all_tags,
-                           can_assign_device_tag=has_permission('assign_device_tag'),
-                           can_remove_device_tag=has_permission('remove_device_tag'),
-                           ip_history=ip_history,
-                           custom_fields=custom_fields,
-                           can_edit_device=has_permission('edit_device'))
-
-@app.route('/ip/<path:ip_address>/history')
-@permission_required('view_subnet')
-def ip_address_history(ip_address):
-    """Get IP assignment history for the subnet UI."""
-    with get_db_connection(current_app) as conn:
-        ip_history = get_ip_history_from_audit_logs(ip_address=ip_address, conn=conn)
-    return jsonify({'history': ip_history, 'ip': ip_address})
-
-
-@app.route('/api/v1/devices/<int:device_id>/ip_history', methods=['GET'])
-@api_permission_required('view_device')
-def api_device_ip_history(device_id):
-    with get_db_connection(current_app) as conn:
-        ip_history = get_ip_history_from_audit_logs(device_id=device_id, conn=conn)
-    return jsonify({'history': ip_history})
-
-
-@app.route('/api/v1/ips/<path:ip_address>/history', methods=['GET'])
-@api_permission_required('view_subnet')
-def api_ip_address_history(ip_address):
-    with get_db_connection(current_app) as conn:
-        ip_history = get_ip_history_from_audit_logs(ip_address=ip_address, conn=conn)
-    return jsonify({'history': ip_history, 'ip': ip_address})
-
-@app.route('/update_device_type', methods=['POST'])
-@permission_required('edit_device')
-def update_device_type():
-    device_id = request.form['device_id']
-    device_type_id = request.form['device_type_id']
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('UPDATE Device SET device_type_id = %s WHERE id = %s', (device_type_id, device_id))
-        conn.commit()
-    logging.info(f"User {user_name} updated device {device_id} to type {device_type_id}.")
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/device/<int:device_id>/add_ip', methods=['POST'])
-@permission_required('add_device_ip')
-def device_add_ip(device_id):
-    subnet_id = request.form['subnet_id']
-    ip_id = request.form['ip_id']
-    user_name = get_current_user_name()
-    from flask import current_app
-    try:
-        with get_db_connection(current_app) as conn:
-            ip = assign_ip_to_device(conn, device_id, ip_id, session['user_id'])
-            conn.commit()
-    except ValueError as e:
-        raise Exception(str(e))
-    logging.info(f"User {user_name} assigned IP {ip} to device {device_id}.")
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/device/<int:device_id>/delete_ip', methods=['POST'])
-@permission_required('remove_device_ip')
-def device_delete_ip(device_id):
-    device_ip_id = request.form['device_ip_id']
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        ip, device_name = remove_ip_from_device(conn, device_ip_id, session['user_id'])
-        conn.commit()
-    logging.info(f"User {user_name} removed IP {ip} from device {device_id}.")
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/device/<int:device_id>/assign_tag', methods=['POST'])
-@permission_required('assign_device_tag')
-def device_assign_tag(device_id):
-    tag_id = request.form['tag_id']
-    with get_db_connection(current_app) as conn:
-        try:
-            assign_tag_to_device(conn, device_id, tag_id, session['user_id'])
-            conn.commit()
-        except ValueError:
-            pass
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/device/<int:device_id>/remove_tag', methods=['POST'])
-@permission_required('remove_device_tag')
-def device_remove_tag(device_id):
-    tag_id = request.form['tag_id']
-    with get_db_connection(current_app) as conn:
-        try:
-            remove_tag_from_device(conn, device_id, tag_id, session['user_id'])
-            conn.commit()
-        except ValueError:
-            pass
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/delete_device', methods=['POST'])
-@permission_required('delete_device')
-def delete_device():
-    device_id = request.form['device_id']
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        device_name = delete_device_record(conn, device_id, session['user_id'])
-        if device_name:
-            conn.commit()
-    logging.info(f"User {user_name} deleted device '{device_name}'.")
-    return redirect(url_for('devices'))
-
-@app.route('/subnet/<int:subnet_id>')
-@permission_required('view_subnet')
-def subnet(subnet_id):
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, cidr, vlan_id, vlan_description, vlan_notes FROM Subnet WHERE id = %s', (subnet_id,))
-        subnet = cursor.fetchone()
-        cursor.execute('''
-            SELECT ip.id, ip.ip, ip.hostname, d.id, d.description, ip.notes
-            FROM IPAddress ip
-            LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-            LEFT JOIN Device d ON dia.device_id = d.id
-            WHERE ip.subnet_id = %s
-            ORDER BY INET_ATON(ip.ip)
-        ''', (subnet_id,))
-        ip_addresses_with_device = cursor.fetchall()
-        utilization_stats = get_subnet_utilization(cursor, subnet_id, include_available=True)
-        
-        # Get custom fields for subnet
-        custom_fields = get_custom_fields_for_entity('subnet', subnet_id, conn=conn)
-        
-        subnet_dict = {
-            'id': subnet[0], 
-            'name': subnet[1], 
-            'cidr': subnet[2],
-            'vlan_id': subnet[3] if len(subnet) > 3 else None,
-            'vlan_description': subnet[4] if len(subnet) > 4 else None,
-            'vlan_notes': subnet[5] if len(subnet) > 5 else None
-        }
-        return render_with_user('subnet.html', subnet=subnet_dict, 
-                              ip_addresses=ip_addresses_with_device, 
-                              utilization=utilization_stats,
-                              custom_fields=custom_fields,
-                              can_edit_subnet=has_permission('edit_subnet'))
-
-@app.route('/add_subnet', methods=['POST'])
-@permission_required('add_subnet')
-def add_subnet():
-    name = request.form['name']
-    cidr = request.form['cidr']
-    site = request.form['site']
-    vlan_id_str = request.form.get('vlan_id', '').strip()
-    vlan_description = request.form.get('vlan_description', '').strip()
-    vlan_notes = request.form.get('vlan_notes', '').strip()
-    user_name = get_current_user_name()
-    
-    # Validate VLAN ID if provided
-    if vlan_id_str:
-        is_valid, error_msg, vlan_id = validate_vlan_id(vlan_id_str)
-        if not is_valid:
-            return render_with_user('admin.html', subnets=[], error=error_msg)
-    else:
-        vlan_id = None
-    
-    try:
-        network = ip_network(cidr, strict=False)
-        if network.prefixlen < 24:
-            return render_with_user('admin.html', subnets=[], error='Subnet must be /24 or smaller (e.g., /24, /25, ... /32)')
-    except Exception:
-        return render_with_user('admin.html', subnets=[], error='Invalid CIDR format.')
-    from flask import current_app
-    try:
-        with get_db_connection(current_app) as conn:
-            create_subnet_from_cidr(
-                conn, name, cidr, site, vlan_id,
-                vlan_description if vlan_description else None,
-                vlan_notes if vlan_notes else None,
-                session['user_id'],
-            )
-            conn.commit()
-    except ValueError as e:
-        return render_with_user('admin.html', subnets=[], error=str(e))
-    logging.info(f"User {user_name} added subnet '{name}' ({cidr}) at site '{site}'.")
-    return redirect(url_for('admin'))
-
-@app.route('/edit_subnet', methods=['POST'])
-@permission_required('edit_subnet')
-def edit_subnet():
-    subnet_id = request.form['subnet_id']
-    name = request.form['name']
-    cidr = request.form['cidr']
-    site = request.form['site']
-    vlan_id_str = request.form.get('vlan_id', '').strip()
-    vlan_description = request.form.get('vlan_description', '').strip()
-    vlan_notes = request.form.get('vlan_notes', '').strip()
-    user_name = get_current_user_name()
-    
-    # Validate VLAN ID if provided
-    if vlan_id_str:
-        is_valid, error_msg, vlan_id = validate_vlan_id(vlan_id_str)
-        if not is_valid:
-            return render_with_user('admin.html', subnets=[], error=error_msg)
-    else:
-        vlan_id = None
-    
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
-        old_subnet = cursor.fetchone()
-        if old_subnet:
-            old_name, old_cidr = old_subnet
-            cursor.execute('UPDATE Subnet SET name = %s, cidr = %s, site = %s, vlan_id = %s, vlan_description = %s, vlan_notes = %s WHERE id = %s', 
-                          (name, cidr, site, vlan_id, vlan_description if vlan_description else None, vlan_notes if vlan_notes else None, subnet_id))
-            vlan_info = f" (VLAN {vlan_id})" if vlan_id else ""
-            add_audit_log(session['user_id'], 'edit_subnet', f"Edited subnet from {old_name} ({old_cidr}) to {name} ({cidr}) at site {site}{vlan_info}", subnet_id, conn=conn)
-            conn.commit()
-    logging.info(f"User {user_name} edited subnet {subnet_id}.")
-    return redirect(url_for('admin'))
-
-@app.route('/delete_subnet', methods=['POST'])
-@permission_required('delete_subnet')
-def delete_subnet():
-    subnet_id = request.form['subnet_id']
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
-        subnet = cursor.fetchone()
-        add_audit_log(session['user_id'], 'delete_subnet', f"Deleted subnet {subnet[0]} ({subnet[1]})", subnet_id, conn=conn)
-        cursor.execute('SELECT id FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-        ip_ids = [row[0] for row in cursor.fetchall()]
-        if ip_ids:
-            cursor.executemany('DELETE FROM DeviceIPAddress WHERE ip_id = %s', [(ip_id,) for ip_id in ip_ids])
-        # Set subnet_id to NULL in audit logs (foreign key will handle this, but doing it explicitly for clarity)
-        cursor.execute('UPDATE AuditLog SET subnet_id=NULL WHERE subnet_id = %s', (subnet_id,))
-        cursor.execute('DELETE FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
-        cursor.execute('DELETE FROM Subnet WHERE id = %s', (subnet_id,))
-        conn.commit()
-    logging.info(f"User {user_name} deleted subnet {subnet_id}.")
-    return redirect(url_for('admin'))
-
-@app.route('/admin', methods=['GET', 'POST'])
-@permission_required('view_admin')
-def admin():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, cidr, site, vlan_id, vlan_description, vlan_notes FROM Subnet ORDER BY site, name')
-        subnet_rows = cursor.fetchall()
-        subnets = []
-        for row in subnet_rows:
-            subnet_id = row[0]
-            util = get_subnet_utilization(cursor, subnet_id, include_available=True)
-            subnets.append({
-                'id': row[0],
-                'name': row[1],
-                'cidr': row[2],
-                'site': row[3] or 'Unassigned',
-                'vlan_id': row[4] if len(row) > 4 and row[4] is not None else None,
-                'vlan_description': row[5] if len(row) > 5 and row[5] is not None else None,
-                'vlan_notes': row[6] if len(row) > 6 and row[6] is not None else None,
-                'utilization': {
-                    'percent': util['percent'],
-                    'assigned': util['assigned'],
-                    'used': util['used'],
-                    'total': util['total']
-                }
-            })
-    
-    result_data = {
-        'subnets': subnets,
-        'can_add_subnet': has_permission('add_subnet'),
-        'can_edit_subnet': has_permission('edit_subnet'),
-        'can_delete_subnet': has_permission('delete_subnet'),
-    }
-    return render_with_user('admin.html', **result_data)
-
-
-@app.route('/account', methods=['GET'])
-@login_required
-def account_settings():
-    from flask import current_app
-    import json
-    
-    user_id = session.get('user_id')
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT u.totp_enabled, u.backup_codes, r.require_2fa
-            FROM User u
-            LEFT JOIN Role r ON u.role_id = r.id
-            WHERE u.id = %s
+            SELECT u.totp_enabled, u.two_fa_setup_complete, r.require_2fa
+            FROM User u LEFT JOIN Role r ON u.role_id = r.id WHERE u.id = %s
         ''', (user_id,))
         result = cursor.fetchone()
         totp_enabled = result[0] if result else False
-        backup_codes_json = result[1] if result else None
+        setup_complete = result[1] if result else False
         role_requires_2fa = result[2] if result else False
-    
-    backup_codes = None
-    if backup_codes_json:
-        try:
-            codes = json.loads(backup_codes_json)
-            backup_codes = format_backup_codes(codes)
-        except (json.JSONDecodeError, TypeError):
-            pass
-    
-    return render_with_user('account_settings.html', 
-                          totp_enabled=totp_enabled,
-                          backup_codes=backup_codes,
-                          role_requires_2fa=role_requires_2fa)
+        if role_requires_2fa and not setup_complete:
+            session['pending_user_id'] = user_id
+            session['pending_email'] = email
+            return jsonify({'requires_setup': True})
+        if totp_enabled:
+            session['pending_user_id'] = user_id
+            session['pending_email'] = email
+            return jsonify({'requires_2fa': True})
+        establish_user_session(user_id, conn=conn)
+    logging.info(f"User {email} logged in successfully.")
+    return jsonify({'ok': True})
 
-@app.route('/account/enable-2fa', methods=['GET', 'POST'])
-@login_required
-def enable_2fa():
-    return process_2fa_setup_request(request, session.get('user_id'), 'enable_2fa.html', complete_login=False)
 
-@app.route('/account/disable-2fa', methods=['POST'])
-@login_required
-def disable_2fa():
-    from flask import current_app
-    
-    user_id = session.get('user_id')
+@app.route('/api/v2/auth/logout', methods=['POST'])
+def api_auth_logout():
+    session.clear()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/auth/me', methods=['GET'])
+def api_auth_me():
+    user = resolve_auth()
+    if not user:
+        return jsonify({
+            'logged_in': False,
+            'app_version': app.config['VERSION'],
+            'org': {'name': app.config['NAME'], 'logo': app.config['LOGO_PNG']},
+        })
+    return jsonify({
+        'logged_in': True,
+        'app_version': app.config['VERSION'],
+        'org': {'name': app.config['NAME'], 'logo': app.config['LOGO_PNG']},
+        'user': {'id': user['id'], 'name': user['name'], 'email': user.get('email', '')},
+        'permissions': sorted(user.get('permissions') or []),
+    })
+
+
+@app.route('/api/v2/auth/verify-2fa', methods=['POST'])
+def api_auth_verify_2fa():
+    data = json_body()
+    pending_user_id = session.get('pending_user_id')
+    if not pending_user_id:
+        return jsonify({'error': 'No pending login'}), 400
+    code = (data.get('code') or '').strip()
+    use_backup = bool(data.get('use_backup'))
+    if not code:
+        return jsonify({'error': 'Verification code required'}), 400
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE User 
-            SET totp_secret = NULL, totp_enabled = FALSE, backup_codes = NULL, two_fa_setup_complete = FALSE
-            WHERE id = %s
-        ''', (user_id,))
-    
-    logging.info(f"User {user_id} disabled 2FA.")
-    return redirect(url_for('account_settings', success='2FA has been disabled.'))
-
-@app.route('/account/regenerate-backup-codes', methods=['POST'])
-@login_required
-def regenerate_backup_codes():
-    from flask import current_app
-    import json
-    
-    user_id = session.get('user_id')
-    backup_codes = generate_backup_codes()
-    backup_codes_json = json.dumps(backup_codes)
-    
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('UPDATE User SET backup_codes = %s WHERE id = %s', (backup_codes_json, user_id))
-    
-    formatted_codes = format_backup_codes(backup_codes)
-    logging.info(f"User {user_id} regenerated backup codes.")
-    return render_with_user('regenerate_backup_codes.html', backup_codes=formatted_codes)
-
-@app.route('/account/change-password', methods=['POST'])
-@login_required
-def change_password():
-    from flask import current_app
-    
-    user_id = session.get('user_id')
-    current_password = request.form.get('current_password')
-    new_password = request.form.get('new_password')
-    confirm_password = request.form.get('confirm_password')
-    
-    if new_password != confirm_password:
-        return redirect(url_for('account_settings', error='New passwords do not match.'))
-    
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT password FROM User WHERE id = %s', (user_id,))
+        cursor.execute('SELECT totp_secret, backup_codes FROM User WHERE id = %s', (pending_user_id,))
         result = cursor.fetchone()
-        if not result or not verify_password(current_password, result[0]):
-            return redirect(url_for('account_settings', error='Current password is incorrect.'))
-        
-        hashed_password = hash_password(new_password)
-        cursor.execute('UPDATE User SET password = %s WHERE id = %s', (hashed_password, user_id))
-    
-    logging.info(f"User {user_id} changed password.")
-    return redirect(url_for('account_settings', success='Password changed successfully.'))
-
-@app.route('/users', methods=['GET', 'POST'])
-@permission_required('view_users')
-def users():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        error = None
-        if request.method == 'POST':
-            action = request.form['action']
-            user_name = get_current_user_name()
-            
-            # User management actions
-            if action == 'add_user':
-                if not has_permission('manage_users', conn=conn):
-                    error = 'You do not have permission to add users.'
-                else:
-                    name = request.form['name']
-                    email = request.form['email']
-                    password = hash_password(request.form['password'])
-                    role_id = request.form.get('role_id')
-                    if role_id:
-                        api_key = generate_api_key()
-                        cursor.execute('INSERT INTO User (name, email, password, role_id, api_key) VALUES (%s, %s, %s, %s, %s)', (name, email, password, role_id, api_key))
-                    else:
-                        api_key = generate_api_key()
-                        cursor.execute('INSERT INTO User (name, email, password, api_key) VALUES (%s, %s, %s, %s)', (name, email, password, api_key))
-                    logging.info(f"User {user_name} added user '{name}' ({email}).")
-                    conn.commit()
-            elif action == 'edit_user':
-                if not has_permission('manage_users', conn=conn):
-                    error = 'You do not have permission to edit users.'
-                else:
-                    user_id = request.form['user_id']
-                    name = request.form['name']
-                    email = request.form['email']
-                    password = request.form.get('password', '')
-                    role_id = request.form.get('role_id')
-                    if password:
-                        password = hash_password(password)
-                        if role_id:
-                            cursor.execute('UPDATE User SET name=%s, email=%s, password=%s, role_id=%s WHERE id=%s', (name, email, password, role_id, user_id))
-                        else:
-                            cursor.execute('UPDATE User SET name=%s, email=%s, password=%s WHERE id=%s', (name, email, password, user_id))
-                    else:
-                        if role_id:
-                            cursor.execute('UPDATE User SET name=%s, email=%s, role_id=%s WHERE id=%s', (name, email, role_id, user_id))
-                        else:
-                            cursor.execute('UPDATE User SET name=%s, email=%s WHERE id=%s', (name, email, user_id))
-                    logging.info(f"User {user_name} edited user {user_id}.")
-                    conn.commit()
-            elif action == 'delete_user':
-                if not has_permission('manage_users', conn=conn):
-                    error = 'You do not have permission to delete users.'
-                else:
-                    user_id = request.form['user_id']
-                    cursor.execute('UPDATE User SET name=%s WHERE id=%s', ('Deleted User', user_id))
-                    cursor.execute('UPDATE AuditLog SET user_id=NULL WHERE user_id=%s', (user_id,))
-                    cursor.execute('DELETE FROM User WHERE id=%s', (user_id,))
-                    logging.info(f"User {user_name} deleted user {user_id}.")
-                    conn.commit()
-            
-            # Role management actions
-            elif action == 'add_role':
-                if not has_permission('manage_roles', conn=conn):
-                    error = 'You do not have permission to add roles.'
-                else:
-                    role_name = request.form['role_name'].strip()
-                    role_description = request.form.get('role_description', '').strip()
-                    require_2fa = request.form.get('require_2fa') == 'on'
-                    if not role_name:
-                        error = 'Role name is required.'
-                    else:
-                        try:
-                            cursor.execute('INSERT INTO Role (name, description, require_2fa) VALUES (%s, %s, %s)', (role_name, role_description, require_2fa))
-                            role_id = cursor.lastrowid
-                            # Get selected permissions
-                            permission_ids = request.form.getlist('permissions')
-                            for perm_id in permission_ids:
-                                cursor.execute('INSERT INTO RolePermission (role_id, permission_id) VALUES (%s, %s)', (role_id, perm_id))
-                            conn.commit()
-                            logging.info(f"User {user_name} added role '{role_name}'.")
-                        except mysql.connector.IntegrityError as e:
-                            if e.errno == 1062:  # Duplicate entry
-                                error = f"Role '{role_name}' already exists."
-                            else:
-                                raise
-            elif action == 'edit_role':
-                if not has_permission('manage_roles', conn=conn):
-                    error = 'You do not have permission to edit roles.'
-                else:
-                    role_id = request.form['role_id']
-                    role_name = request.form['role_name'].strip()
-                    role_description = request.form.get('role_description', '').strip()
-                    require_2fa = request.form.get('require_2fa') == 'on'
-                    if not role_name:
-                        error = 'Role name is required.'
-                    else:
-                        try:
-                            cursor.execute('UPDATE Role SET name=%s, description=%s, require_2fa=%s WHERE id=%s', (role_name, role_description, require_2fa, role_id))
-                            # Update permissions
-                            cursor.execute('DELETE FROM RolePermission WHERE role_id=%s', (role_id,))
-                            permission_ids = request.form.getlist('permissions')
-                            for perm_id in permission_ids:
-                                cursor.execute('INSERT INTO RolePermission (role_id, permission_id) VALUES (%s, %s)', (role_id, perm_id))
-                            conn.commit()
-                            logging.info(f"User {user_name} edited role {role_id}.")
-                        except mysql.connector.IntegrityError as e:
-                            if e.errno == 1062:  # Duplicate entry
-                                error = f"Role '{role_name}' already exists."
-                            else:
-                                raise
-            elif action == 'delete_role':
-                if not has_permission('manage_roles', conn=conn):
-                    error = 'You do not have permission to delete roles.'
-                else:
-                    role_id = request.form['role_id']
-                    # Check if any users are using this role
-                    cursor.execute('SELECT COUNT(*) FROM User WHERE role_id = %s', (role_id,))
-                    user_count = cursor.fetchone()[0]
-                    if user_count > 0:
-                        cursor.execute('SELECT name FROM Role WHERE id = %s', (role_id,))
-                        role_name = cursor.fetchone()[0]
-                        error = f"Cannot delete role '{role_name}' because {user_count} user(s) are using it."
-                    else:
-                        cursor.execute('SELECT name FROM Role WHERE id = %s', (role_id,))
-                        role_name = cursor.fetchone()[0]
-                        cursor.execute('DELETE FROM Role WHERE id = %s', (role_id,))
-                        conn.commit()
-                        logging.info(f"User {user_name} deleted role '{role_name}'.")
-            elif action == 'regenerate_api_key':
-                if not has_permission('manage_users', conn=conn):
-                    error = 'You do not have permission to regenerate API keys.'
-                else:
-                    user_id = request.form['user_id']
-                    new_api_key = generate_api_key()
-                    cursor.execute('UPDATE User SET api_key = %s WHERE id = %s', (new_api_key, user_id))
-                    conn.commit()
-                    logging.info(f"User {user_name} regenerated API key for user {user_id}.")
-        
-        # Get users with their roles and API keys
-        cursor.execute('''
-            SELECT u.id, u.name, u.email, r.id as role_id, r.name as role_name, u.api_key
-            FROM User u
-            LEFT JOIN Role r ON u.role_id = r.id
-            ORDER BY u.name
-        ''')
-        users = cursor.fetchall()
-        
-        # Get all roles
-        cursor.execute('SELECT id, name, description, require_2fa FROM Role ORDER BY name')
-        roles = cursor.fetchall()
-        
-        # Get all permissions grouped by category
-        cursor.execute('SELECT id, name, description, category FROM Permission ORDER BY category, name')
-        permissions = cursor.fetchall()
-        
-        # Get permissions for each role
-        role_permissions = {}
-        for role in roles:
-            role_id = role[0]
-            cursor.execute('''
-                SELECT permission_id FROM RolePermission WHERE role_id = %s
-            ''', (role_id,))
-            role_permissions[role_id] = [row[0] for row in cursor.fetchall()]
-    
-    return render_with_user('users.html', users=users, roles=roles, permissions=permissions, role_permissions=role_permissions, error=error, 
-                           can_manage_users=has_permission('manage_users'), can_manage_roles=has_permission('manage_roles'))
-
-@app.route('/tags', methods=['GET', 'POST'])
-@permission_required('view_tags')
-def tags():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        error = None
-        
-        if request.method == 'POST':
-            action = request.form['action']
-            
-            if action == 'add_tag':
-                if not has_permission('add_tag', conn=conn):
-                    error = 'You do not have permission to add tags.'
-                else:
-                    name = request.form['name'].strip()
-                    color = request.form.get('color', '#6B7280')
-                    description = request.form.get('description', '').strip()
-                    
-                    if not name:
-                        error = 'Tag name is required.'
-                    else:
-                        try:
-                            cursor.execute('INSERT INTO Tag (name, color, description) VALUES (%s, %s, %s)', 
-                                         (name, color, description))
-                            add_audit_log(session['user_id'], 'add_tag', f"Added tag '{name}'", conn=conn)
-                            conn.commit()
-                        except mysql.connector.IntegrityError:
-                            error = 'Tag name already exists.'
-            
-            elif action == 'edit_tag':
-                if not has_permission('edit_tag', conn=conn):
-                    error = 'You do not have permission to edit tags.'
-                else:
-                    tag_id = request.form['tag_id']
-                    name = request.form['name'].strip()
-                    color = request.form.get('color', '#6B7280')
-                    description = request.form.get('description', '').strip()
-                    
-                    if not name:
-                        error = 'Tag name is required.'
-                    else:
-                        try:
-                            cursor.execute('UPDATE Tag SET name = %s, color = %s, description = %s WHERE id = %s', 
-                                         (name, color, description, tag_id))
-                            add_audit_log(session['user_id'], 'edit_tag', f"Updated tag '{name}'", conn=conn)
-                            conn.commit()
-                        except mysql.connector.IntegrityError:
-                            error = 'Tag name already exists.'
-            
-            elif action == 'delete_tag':
-                if not has_permission('delete_tag', conn=conn):
-                    error = 'You do not have permission to delete tags.'
-                else:
-                    tag_id = request.form['tag_id']
-                    cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
-                    tag_name = cursor.fetchone()[0]
-                    cursor.execute('DELETE FROM Tag WHERE id = %s', (tag_id,))
-                    add_audit_log(session['user_id'], 'delete_tag', f"Deleted tag '{tag_name}'", conn=conn)
-                    conn.commit()
-        
-        # Get all tags with device counts
-        cursor.execute('''
-            SELECT t.id, t.name, t.color, t.description, t.created_at,
-                   COUNT(dt.device_id) as device_count
-            FROM Tag t
-            LEFT JOIN DeviceTag dt ON t.id = dt.tag_id
-            GROUP BY t.id, t.name, t.color, t.description, t.created_at
-            ORDER BY t.name
-        ''')
-        tags = [dict(id=row[0], name=row[1], color=row[2], description=row[3], 
-                    created_at=row[4], device_count=row[5]) for row in cursor.fetchall()]
-        
-    return render_with_user('tags.html', tags=tags, error=error,
-                           can_add_tag=has_permission('add_tag'),
-                           can_edit_tag=has_permission('edit_tag'),
-                           can_delete_tag=has_permission('delete_tag'))
-
-@app.route('/custom_fields', methods=['GET', 'POST'])
-@permission_required('view_custom_fields')
-def custom_fields():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        error = None
-        
-        if request.method == 'POST':
-            action = request.form.get('action')
-            
-            if action == 'add_field':
-                if not has_permission('manage_custom_fields', conn=conn):
-                    error = 'You do not have permission to add custom fields.'
-                else:
-                    entity_type = request.form.get('entity_type', '').strip()
-                    if not entity_type or entity_type not in ['device', 'subnet']:
-                        error = 'Invalid entity type. Must be "device" or "subnet".'
-                    else:
-                        name = request.form['name'].strip()
-                        field_key = request.form.get('field_key', '').strip()
-                        field_type = request.form['field_type']
-                        required = 'required' in request.form
-                        default_value = request.form.get('default_value', '').strip()
-                        help_text = request.form.get('help_text', '').strip()
-                        display_order = int(request.form.get('display_order', 0))
-                        
-                        # Generate field_key from name if not provided
-                        if not field_key:
-                            field_key = re.sub(r'[^a-z0-9_]+', '_', name.lower()).strip('_')
-                        
-                        # Build validation_rules JSON
-                        validation_rules_json = build_validation_rules_from_form(request.form, field_type)
-                        
-                        if not name:
-                            error = 'Field name is required.'
-                        elif not field_key:
-                            error = 'Field key is required.'
-                        else:
-                            try:
-                                cursor.execute('''
-                                    INSERT INTO CustomFieldDefinition 
-                                    (entity_type, name, field_key, field_type, required, default_value, 
-                                     help_text, display_order, validation_rules)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                ''', (entity_type, name, field_key, field_type, required, default_value,
-                                      help_text, display_order, validation_rules_json))
-                                add_audit_log(session['user_id'], 'add_custom_field', 
-                                            f"Added custom field '{name}' for {entity_type}", conn=conn)
-                                conn.commit()
-                                # Redirect to preserve tab state
-                                return redirect(url_for('custom_fields', tab=entity_type))
-                            except mysql.connector.IntegrityError:
-                                error = f'Field key "{field_key}" already exists.'
-            
-            elif action == 'edit_field':
-                if not has_permission('manage_custom_fields', conn=conn):
-                    error = 'You do not have permission to edit custom fields.'
-                else:
-                    field_id = request.form['field_id']
-                    name = request.form['name'].strip()
-                    field_type = request.form['field_type']
-                    required = 'required' in request.form
-                    default_value = request.form.get('default_value', '').strip()
-                    help_text = request.form.get('help_text', '').strip()
-                    display_order = int(request.form.get('display_order', 0))
-                    
-                    # Build validation_rules JSON
-                    validation_rules_json = build_validation_rules_from_form(request.form, field_type)
-                    
-                    if not name:
-                        error = 'Field name is required.'
-                    else:
-                        # Get entity_type of the field being edited
-                        cursor.execute('SELECT entity_type FROM CustomFieldDefinition WHERE id = %s', (field_id,))
-                        field_row = cursor.fetchone()
-                        entity_type = field_row['entity_type'] if field_row else 'device'
-                        
-                        cursor.execute('''
-                            UPDATE CustomFieldDefinition 
-                            SET name = %s, field_type = %s, required = %s, default_value = %s,
-                                help_text = %s, display_order = %s, validation_rules = %s
-                            WHERE id = %s
-                        ''', (name, field_type, required, default_value, help_text, 
-                              display_order, validation_rules_json, field_id))
-                        add_audit_log(session['user_id'], 'edit_custom_field', 
-                                    f"Updated custom field '{name}'", conn=conn)
-                        conn.commit()
-                        # Redirect to preserve tab state
-                        return redirect(url_for('custom_fields', tab=entity_type))
-            
-            elif action == 'delete_field':
-                if not has_permission('manage_custom_fields', conn=conn):
-                    error = 'You do not have permission to delete custom fields.'
-                else:
-                    field_id = request.form['field_id']
-                    cursor.execute('SELECT name, entity_type FROM CustomFieldDefinition WHERE id = %s', (field_id,))
-                    field = cursor.fetchone()
-                    if field:
-                        field_name = field['name']
-                        entity_type = field['entity_type']
-                        cursor.execute('DELETE FROM CustomFieldDefinition WHERE id = %s', (field_id,))
-                        add_audit_log(session['user_id'], 'delete_custom_field', 
-                                    f"Deleted custom field '{field_name}'", conn=conn)
-                        conn.commit()
-                        # Redirect to preserve tab state
-                        return redirect(url_for('custom_fields', tab=entity_type))
-            
-            elif action == 'reorder':
-                if not has_permission('manage_custom_fields', conn=conn):
-                    error = 'You do not have permission to reorder custom fields.'
-                else:
-                    entity_type = request.form['entity_type']
-                    field_orders = json.loads(request.form['field_orders'])
-                    for field_id, order in field_orders.items():
-                        cursor.execute('UPDATE CustomFieldDefinition SET display_order = %s WHERE id = %s AND entity_type = %s',
-                                     (order, field_id, entity_type))
-                    conn.commit()
-                    return redirect(url_for('custom_fields', tab=entity_type))
-        
-        # Get all custom fields grouped by entity type
-        cursor.execute('''
-            SELECT id, entity_type, name, field_key, field_type, required, 
-                   default_value, help_text, display_order, validation_rules
-            FROM CustomFieldDefinition
-            ORDER BY entity_type, display_order, name
-        ''')
-        all_fields = cursor.fetchall()
-        
-        # Parse validation_rules JSON strings to objects
-        for field in all_fields:
-            if field['validation_rules']:
-                try:
-                    field['validation_rules'] = json.loads(field['validation_rules'])
-                except (json.JSONDecodeError, TypeError):
-                    field['validation_rules'] = {}
-            else:
-                field['validation_rules'] = {}
-        
-        device_fields = [f for f in all_fields if f['entity_type'] == 'device']
-        subnet_fields = [f for f in all_fields if f['entity_type'] == 'subnet']
-        
-        # Get active tab from query parameter
-        active_tab = request.args.get('tab', 'device')
-        if active_tab not in ['device', 'subnet']:
-            active_tab = 'device'
-        
-    return render_with_user('custom_fields.html', 
-                           device_fields=device_fields,
-                           subnet_fields=subnet_fields,
-                           error=error,
-                           can_manage=has_permission('manage_custom_fields'),
-                           active_tab=active_tab)
+        if not result:
+            return jsonify({'error': 'User not found'}), 404
+        totp_secret, backup_codes_json = result
+        if not totp_secret:
+            return jsonify({'error': '2FA is not configured for this account'}), 400
+        if use_backup:
+            if not backup_codes_json:
+                return jsonify({'error': 'No backup codes available'}), 400
+            valid, updated_codes = verify_backup_code(backup_codes_json, code)
+            if not valid:
+                return jsonify({'error': 'Invalid backup code'}), 401
+            cursor.execute('UPDATE User SET backup_codes = %s WHERE id = %s', (updated_codes, pending_user_id))
+            conn.commit()
+        else:
+            if len(code) != 6 or not code.isdigit():
+                return jsonify({'error': 'Invalid code format'}), 400
+            if not verify_totp(totp_secret, code):
+                return jsonify({'error': 'Invalid verification code'}), 401
+        establish_user_session(pending_user_id, conn=conn)
+        session.pop('pending_user_id', None)
+        session.pop('pending_email', None)
+    return jsonify({'ok': True})
 
 
-@app.route('/audit')
-@permission_required('view_audit')
-def audit():
-    PER_PAGE = 25
-    page = int(request.args.get('page', 1))
-    offset = (page - 1) * PER_PAGE
-    user_ids = request.args.getlist('user_ids')
-    date_from = request.args.get('date_from')
-    date_to = request.args.get('date_to')
-    search_query = request.args.get('search', '').strip()
-    filter_sql, params = build_audit_filter_clause(request.args)
-    query = '''SELECT AuditLog.id, COALESCE(User.name, 'Deleted User'), AuditLog.action, AuditLog.details, Subnet.name, AuditLog.timestamp FROM AuditLog LEFT JOIN User ON AuditLog.user_id = User.id LEFT JOIN Subnet ON AuditLog.subnet_id = Subnet.id WHERE 1=1''' + filter_sql
-    count_query = 'SELECT COUNT(*) FROM (' + query + ') AS count_subquery'
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(buffered=True)
-        cursor.execute(count_query, params)
-        total_logs = cursor.fetchone()[0]
-        query += ' ORDER BY AuditLog.timestamp DESC LIMIT %s OFFSET %s'
-        cursor.execute(query, params + [PER_PAGE, offset])
-        logs = cursor.fetchall()
-        cursor.execute('SELECT id, name FROM User ORDER BY name')
-        users = cursor.fetchall()
-        cursor.execute('SELECT id, name FROM Subnet ORDER BY name')
-        subnets = cursor.fetchall()
-        cursor.execute('SELECT DISTINCT action FROM AuditLog ORDER BY action')
-        actions = [row[0] for row in cursor.fetchall()]
-        cursor.execute('SELECT name FROM Device ORDER BY name')
-        devices = cursor.fetchall()
-    total_pages = (total_logs + PER_PAGE - 1) // PER_PAGE
-    return render_with_user('audit.html', logs=logs, users=users, subnets=subnets, actions=actions, devices=devices, page=page, total_pages=total_pages, query_args=request.args.to_dict(), selected_user_ids=user_ids, date_from=date_from, date_to=date_to, search_query=search_query)
-
-@app.route('/audit/export_csv')
-@permission_required('view_audit')
-def export_audit_csv():
-    """Export audit logs to CSV with current filters applied"""
-    filter_sql, params = build_audit_filter_clause(request.args)
-    query = '''SELECT COALESCE(User.name, 'Deleted User'), AuditLog.action, AuditLog.details, COALESCE(Subnet.name, 'N/A'), AuditLog.timestamp FROM AuditLog LEFT JOIN User ON AuditLog.user_id = User.id LEFT JOIN Subnet ON AuditLog.subnet_id = Subnet.id WHERE 1=1''' + filter_sql + ' ORDER BY AuditLog.timestamp DESC'
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        logs = cursor.fetchall()
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    return csv_attachment(logs, ['User', 'Action', 'Details', 'Subnet', 'Timestamp'], f'audit_logs_{timestamp}.csv')
-
-
-@app.route('/get_available_ips')
-@permission_required('view_device')
-def get_available_ips():
-    subnet_id = request.args.get('subnet_id')
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT ip.id, ip.ip FROM IPAddress ip
-            LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-            WHERE ip.subnet_id = %s AND dia.ip_id IS NULL AND (ip.hostname IS NULL OR ip.hostname != 'DHCP')
-        ''', (subnet_id,))
-        available_ips = cursor.fetchall()
-        
-        # Filter out DHCP pool IPs
-        cursor.execute('SELECT start_ip, end_ip, excluded_ips FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
-        dhcp_row = cursor.fetchone()
-        if dhcp_row:
-            start_ip, end_ip, excluded_ips = dhcp_row
-            excluded_list = [x for x in (excluded_ips or '').replace(' ', '').split(',') if x]
-            in_range = False
-            filtered_ips = []
-            for ip_obj in available_ips:
-                ip = ip_obj[1]
-                if ip == start_ip:
-                    in_range = True
-                if ip in excluded_list or not (in_range and ip not in excluded_list):
-                    filtered_ips.append(ip_obj)
-                if ip == end_ip:
-                    in_range = False
-            available_ips = filtered_ips
-        
-        available_ips = [{'id': row[0], 'ip': row[1]} for row in available_ips]
-    return {'available_ips': available_ips}
-
-@app.route('/rename_device', methods=['POST'])
-@permission_required('edit_device')
-def rename_device():
-    device_id = request.form['device_id']
-    new_name = request.form['new_name']
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-        old_name = cursor.fetchone()[0]
-        cursor.execute('UPDATE Device SET name = %s WHERE id = %s', (new_name, device_id))
-        cursor.execute('UPDATE IPAddress SET hostname = %s WHERE hostname = %s', (new_name, old_name))
-        conn.commit()
-        add_audit_log(session['user_id'], 'rename_device', f"Renamed device '{old_name}' to '{new_name}'", conn=conn)
-    logging.info(f"User {user_name} renamed device {device_id} from '{old_name}' to '{new_name}'.")
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/update_device_description', methods=['POST'])
-@permission_required('edit_device')
-def update_device_description():
-    device_id = request.form['device_id']
-    description = request.form['description']
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('UPDATE Device SET description = %s WHERE id = %s', (description, device_id))
-        conn.commit()
-    logging.info(f"User {user_name} updated description for device {device_id}.")
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/ip/<int:ip_id>/update_notes', methods=['POST'])
-@permission_required('edit_subnet')
-def update_ip_notes(ip_id):
-    from flask import jsonify
-    user_name = get_current_user_name()
-    from flask import current_app
-    
-    # Get notes from request (can be JSON or form data)
-    if request.is_json:
-        notes = request.json.get('notes', '')
-    else:
-        notes = request.form.get('notes', '')
-    
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        # Get subnet_id for cache invalidation and audit log
-        cursor.execute('SELECT subnet_id, ip FROM IPAddress WHERE id = %s', (ip_id,))
-        ip_result = cursor.fetchone()
-        if not ip_result:
-            return jsonify({'success': False, 'error': 'IP address not found'}), 404
-        
-        subnet_id, ip_address = ip_result
-        
-        # Update notes
-        cursor.execute('UPDATE IPAddress SET notes = %s WHERE id = %s', (notes, ip_id))
-        conn.commit()
-        
-        # Add audit log
-        add_audit_log(
-            session['user_id'],
-            'update_ip_notes',
-            f"Updated notes for IP {ip_address}",
-            subnet_id,
-            conn=conn
-        )
-    
-    logging.info(f"User {user_name} updated notes for IP {ip_address} (ID: {ip_id}).")
-    return jsonify({'success': True, 'message': 'Notes updated successfully'})
-
-@app.route('/device/<int:device_id>/update_custom_fields', methods=['POST'])
-@permission_required('edit_device')
-def update_device_custom_fields(device_id):
-    """Update custom field values for a device"""
-    submitted = request.json if request.is_json else request.form
-    with get_db_connection(current_app) as conn:
-        errors = update_entity_custom_fields(conn, 'device', device_id, submitted, session['user_id'], request.is_json)
-        if errors:
-            return jsonify({'error': 'Validation errors', 'errors': errors}), 400
-        conn.commit()
-    if request.is_json or request.headers.get('Content-Type') == 'application/json':
-        return jsonify({'success': True, 'message': 'Custom fields updated successfully'})
-    return redirect(url_for('device', device_id=device_id))
-
-@app.route('/subnet/<int:subnet_id>/update_custom_fields', methods=['POST'])
-@permission_required('edit_subnet')
-def update_subnet_custom_fields(subnet_id):
-    """Update custom field values for a subnet"""
-    submitted = request.json if request.is_json else request.form
-    with get_db_connection(current_app) as conn:
-        errors = update_entity_custom_fields(conn, 'subnet', subnet_id, submitted, session['user_id'], request.is_json)
-        if errors:
-            return jsonify({'error': 'Validation errors', 'errors': errors}), 400
-        conn.commit()
-    if request.is_json or request.headers.get('Content-Type') == 'application/json':
-        return jsonify({'success': True, 'message': 'Custom fields updated successfully'})
-    return redirect(url_for('subnet', subnet_id=subnet_id))
-
-@app.route('/subnet/<int:subnet_id>/export_csv')
-@permission_required('export_subnet_csv')
-def export_subnet_csv(subnet_id):
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
-        subnet = cursor.fetchone()
-        if not subnet:
-            return 'Subnet not found', 404
-        rows = subnet_ip_csv_rows(fetch_subnet_ip_rows(cursor, subnet_id))
-    filename = f"{subnet[1]}_{subnet[2]}_subnet.csv".replace(' ', '_')
-    return csv_attachment(rows, ['IP Address', 'Hostname', 'Description'], filename)
-
-@app.route('/subnet/<int:subnet_id>/dhcp', methods=['GET', 'POST'])
-@permission_required('view_dhcp')
-def dhcp_pool(subnet_id):
-    error = None
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
-        subnet = cursor.fetchone()
-        dhcp_pool = None
-        cursor.execute('SELECT start_ip, end_ip, excluded_ips FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
-        row = cursor.fetchone()
-        if row:
-            dhcp_pool = {'start_ip': row[0], 'end_ip': row[1], 'excluded_ips': row[2] if len(row) > 2 else ''}
-        if request.method == 'POST':
-            if not has_permission('configure_dhcp', conn=conn):
-                error = 'You do not have permission to configure DHCP pools.'
-            elif 'remove' in request.form:
-                remove_dhcp_pool(cursor, subnet_id, subnet[1], subnet[2], session['user_id'], conn)
-                conn.commit()
-                dhcp_pool = None
-            else:
-                cursor.execute('SELECT id FROM DHCPPool WHERE subnet_id = %s', (subnet_id,))
-                is_update = cursor.fetchone() is not None
-                try:
-                    dhcp_pool = configure_dhcp_pool(
-                        cursor, subnet_id,
-                        request.form['start_ip'], request.form['end_ip'],
-                        request.form.get('excluded_ips', ''),
-                        subnet[1], subnet[2], session['user_id'], conn, is_update,
-                    )
-                    conn.commit()
-                except ValueError as exc:
-                    error = str(exc)
-        return render_with_user('dhcp.html', subnet={'id': subnet[0], 'name': subnet[1]}, dhcp_pool=dhcp_pool, error=error)
-
-@app.route('/device_type_stats')
-@permission_required('view_device_type_stats')
-def device_type_stats():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT DeviceType.name, DeviceType.icon_class, COUNT(Device.id) as count
-            FROM DeviceType
-            LEFT JOIN Device ON Device.device_type_id = DeviceType.id
-            GROUP BY DeviceType.id, DeviceType.name, DeviceType.icon_class
-            ORDER BY DeviceType.name
-        ''')
-        stats = cursor.fetchall()
-    return render_with_user('device_type_stats.html', stats=stats)
-
-@app.route('/device_types', methods=['GET', 'POST'])
-@permission_required('view_device_types')
-def device_types():
-    from flask import current_app
-    error = None
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        if request.method == 'POST':
-            action = request.form['action']
-            user_name = get_current_user_name()
-            if action == 'add':
-                if not has_permission('add_device_type', conn=conn):
-                    error = 'You do not have permission to add device types.'
-                else:
-                    name = request.form['name'].strip()
-                    icon_class = request.form['icon_class'].strip()
-                    if not name:
-                        error = 'Device type name is required.'
-                    elif not icon_class:
-                        error = 'Icon class is required.'
-                    else:
-                        try:
-                            cursor.execute('INSERT INTO DeviceType (name, icon_class) VALUES (%s, %s)', (name, icon_class))
-                            conn.commit()
-                            logging.info(f"User {user_name} added device type '{name}' with icon '{icon_class}'.")
-                        except mysql.connector.IntegrityError as e:
-                            if e.errno == 1062:  # Duplicate entry
-                                error = f"Device type '{name}' already exists."
-                            else:
-                                raise
-            elif action == 'edit':
-                if not has_permission('edit_device_type', conn=conn):
-                    error = 'You do not have permission to edit device types.'
-                else:
-                    device_type_id = request.form['device_type_id']
-                    name = request.form['name'].strip()
-                    icon_class = request.form['icon_class'].strip()
-                    if not name:
-                        error = 'Device type name is required.'
-                    elif not icon_class:
-                        error = 'Icon class is required.'
-                    else:
-                        try:
-                            cursor.execute('UPDATE DeviceType SET name = %s, icon_class = %s WHERE id = %s', (name, icon_class, device_type_id))
-                            conn.commit()
-                            logging.info(f"User {user_name} edited device type {device_type_id} to '{name}' with icon '{icon_class}'.")
-                        except mysql.connector.IntegrityError as e:
-                            if e.errno == 1062:  # Duplicate entry
-                                error = f"Device type '{name}' already exists."
-                            else:
-                                raise
-            elif action == 'delete':
-                if not has_permission('delete_device_type', conn=conn):
-                    error = 'You do not have permission to delete device types.'
-                else:
-                    device_type_id = request.form['device_type_id']
-                    # Check if any devices are using this device type
-                    cursor.execute('SELECT COUNT(*) FROM Device WHERE device_type_id = %s', (device_type_id,))
-                    device_count = cursor.fetchone()[0]
-                    if device_count > 0:
-                        cursor.execute('SELECT name FROM DeviceType WHERE id = %s', (device_type_id,))
-                        device_type_name = cursor.fetchone()[0]
-                        error = f"Cannot delete device type '{device_type_name}' because {device_count} device(s) are using it."
-                    else:
-                        cursor.execute('SELECT name FROM DeviceType WHERE id = %s', (device_type_id,))
-                        device_type_name = cursor.fetchone()[0]
-                        cursor.execute('DELETE FROM DeviceType WHERE id = %s', (device_type_id,))
-                        conn.commit()
-                        logging.info(f"User {user_name} deleted device type '{device_type_name}'.")
-        cursor.execute('SELECT id, name, icon_class FROM DeviceType ORDER BY name')
-        device_types = cursor.fetchall()
-    return render_with_user('device_types.html', device_types=device_types, error=error)
-
-@app.route('/devices/type/<device_type>')
-@permission_required('view_devices_by_type')
-def devices_by_type(device_type):
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, icon_class FROM DeviceType WHERE name = %s', (device_type,))
-        row = cursor.fetchone()
-        if not row:
-            return f"Device type '{device_type}' not found", 404
-        device_type_id, icon_class = row
-        cursor.execute('''
-            SELECT DISTINCT Device.id, Device.name, Device.description, Subnet.site
-            FROM Device
-            LEFT JOIN DeviceIPAddress ON Device.id = DeviceIPAddress.device_id
-            LEFT JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id
-            LEFT JOIN Subnet ON IPAddress.subnet_id = Subnet.id
-            WHERE Device.device_type_id = %s
-        ''', (device_type_id,))
-        devices = cursor.fetchall()
-        device_list = [
-            {'id': d[0], 'name': d[1], 'description': d[2], 'site': d[3]}
-            for d in devices
-        ]
-        site_devices = group_devices_by_site(device_list)
-    return render_with_user('devices_by_type.html', device_type=device_type, icon_class=icon_class, site_devices=site_devices)
-
-@app.route('/devices/tag/<int:tag_id>')
-@permission_required('view_devices')
-def devices_by_tag(tag_id):
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name, color FROM Tag WHERE id = %s', (tag_id,))
-        row = cursor.fetchone()
-        if not row:
-            return f"Tag not found", 404
-        tag_id_db, tag_name, tag_color = row
-        cursor.execute('''
-            SELECT DISTINCT Device.id, Device.name, Device.description, Subnet.site
-            FROM Device
-            JOIN DeviceTag ON Device.id = DeviceTag.device_id
-            LEFT JOIN DeviceIPAddress ON Device.id = DeviceIPAddress.device_id
-            LEFT JOIN IPAddress ON DeviceIPAddress.ip_id = IPAddress.id
-            LEFT JOIN Subnet ON IPAddress.subnet_id = Subnet.id
-            WHERE DeviceTag.tag_id = %s
-        ''', (tag_id,))
-        devices = cursor.fetchall()
-        device_list = [
-            {'id': d[0], 'name': d[1], 'description': d[2], 'site': d[3]}
-            for d in devices
-        ]
-        site_devices = group_devices_by_site(device_list)
-    return render_with_user('devices_by_tag.html', tag_name=tag_name, tag_color=tag_color, site_devices=site_devices)
-
-@app.route('/racks')
-@permission_required('view_racks')
-def racks():
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT * FROM Rack')
-        racks = cursor.fetchall()
-        rack_ids = [rack['id'] for rack in racks]
-        usage = {rack_id: 0 for rack_id in rack_ids}
-        if rack_ids:
-            format_strings = ','.join(['%s'] * len(rack_ids))
-            cursor.execute(f'SELECT rack_id, COUNT(*) as used FROM RackDevice WHERE rack_id IN ({format_strings}) AND side = %s GROUP BY rack_id', tuple(rack_ids) + ('front',))
-            for row in cursor.fetchall():
-                usage[row['rack_id']] = row['used']
-        for rack in racks:
-            rack['used_u'] = usage.get(rack['id'], 0)
-            rack['percent_full'] = int((rack['used_u'] / rack['height_u']) * 100) if rack['height_u'] else 0
-    return render_with_user('racks.html', racks=racks)
-
-@app.route('/rack/add', methods=['GET', 'POST'])
-@permission_required('add_rack')
-def add_rack():
-    from flask import current_app
-    if request.method == 'POST':
-        name = request.form['name']
-        site = request.form['site']
-        height_u = int(request.form['height_u'])
-        user_name = get_current_user_name()
+@app.route('/api/v2/auth/setup-2fa', methods=['POST'])
+def api_auth_setup_2fa():
+    data = json_body()
+    action = data.get('action', 'generate')
+    user_id = session.get('pending_user_id') or session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Not authenticated'}), 401
+    if action == 'generate':
+        secret = generate_totp_secret()
+        session['temp_totp_secret'] = secret
         with get_db_connection(current_app) as conn:
             cursor = conn.cursor()
-            cursor.execute('INSERT INTO Rack (name, site, height_u) VALUES (%s, %s, %s)', (name, site, height_u))
-            rack_id = cursor.lastrowid
-            add_audit_log(session['user_id'], 'add_rack', f"Added rack '{name}' at site '{site}' ({height_u}U)", conn=conn)
+            cursor.execute('SELECT email FROM User WHERE id = %s', (user_id,))
+            row = cursor.fetchone()
+            email = row[0] if row else ''
+        uri = get_totp_uri(secret, email)
+        return jsonify({'secret': secret, 'qr_code': generate_qr_code(uri), 'email': email})
+    if action == 'verify':
+        code = (data.get('code') or '').strip()
+        secret = session.get('temp_totp_secret')
+        if not secret:
+            return jsonify({'error': 'Session expired. Generate a new secret.'}), 400
+        if not verify_totp(secret, code):
+            return jsonify({'error': 'Invalid code'}), 401
+        backup_codes = generate_backup_codes()
+        backup_codes_json = json.dumps(backup_codes)
+        with get_db_connection(current_app) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE User SET totp_secret = %s, totp_enabled = TRUE, backup_codes = %s, two_fa_setup_complete = TRUE
+                WHERE id = %s
+            ''', (secret, backup_codes_json, user_id))
             conn.commit()
-        logging.info(f"User {user_name} added rack '{name}' at site '{site}' ({height_u}U).")
-        return redirect(url_for('racks'))
-    return render_with_user('add_rack.html')
+        session.pop('temp_totp_secret', None)
+        complete_login = session.get('pending_user_id') == user_id
+        if complete_login:
+            establish_user_session(user_id, conn=conn)
+            session.pop('pending_user_id', None)
+            session.pop('pending_email', None)
+        return jsonify({'ok': True, 'backup_codes': backup_codes})
+    return jsonify({'error': 'Invalid action'}), 400
 
-@app.route('/rack/<int:rack_id>')
-@permission_required('view_rack')
-def rack(rack_id):
-    side = request.args.get('side', 'front')
-    with get_db_connection(current_app) as conn:
-        return render_rack_page(conn, rack_id, side)
 
-@app.route('/rack/<int:rack_id>/add_device', methods=['POST'])
-@permission_required('add_device_to_rack')
-def rack_add_device(rack_id):
-    device_id = int(request.form['device_id'])
-    position_u = int(request.form['position_u'])
-    side = request.form['side']
-    user_name = get_current_user_name()
+@app.route('/api/v2/account', methods=['GET'])
+@require_auth
+def api_account_get():
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
-        _, placement_error = check_rack_placement(cursor, rack_id, position_u, side)
-        if placement_error == 'Rack not found':
-            return placement_error, 404
-        if placement_error:
-            return render_rack_page(conn, rack_id, side, error=placement_error)
-        cursor.execute(
-            'INSERT INTO RackDevice (rack_id, device_id, position_u, side) VALUES (%s, %s, %s, %s)',
-            (rack_id, device_id, position_u, side),
-        )
-        cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-        device_name = cursor.fetchone()
-        cursor.execute('SELECT name FROM Rack WHERE id = %s', (rack_id,))
-        rack_name = cursor.fetchone()
-        add_audit_log(
-            session['user_id'], 'rack_add_device',
-            f"Assigned device '{device_name['name'] if device_name else device_id}' to rack "
-            f"'{rack_name['name'] if rack_name else rack_id}' U{position_u} ({side})",
-            conn=conn,
-        )
-        conn.commit()
-    logging.info(f"User {user_name} assigned device {device_id} to rack {rack_id} at U{position_u} ({side}).")
-    return redirect(url_for('rack', rack_id=rack_id))
+        cursor.execute('''
+            SELECT u.totp_enabled, u.two_fa_setup_complete, u.backup_codes, r.require_2fa
+            FROM User u LEFT JOIN Role r ON u.role_id = r.id WHERE u.id = %s
+        ''', (get_current_user_id(),))
+        row = cursor.fetchone()
+    backup_codes = None
+    if row and row.get('backup_codes'):
+        try:
+            codes = json.loads(row['backup_codes'])
+            backup_codes = format_backup_codes(codes)
+        except json.JSONDecodeError:
+            pass
+    return jsonify({
+        'user': {'id': get_current_user_id(), 'name': current_user()['name'], 'email': current_user().get('email', '')},
+        'totp_enabled': bool(row and row.get('totp_enabled')),
+        'two_fa_setup_complete': bool(row and row.get('two_fa_setup_complete')),
+        'role_requires_2fa': bool(row and row.get('require_2fa')),
+        'backup_codes': backup_codes,
+    })
 
-@app.route('/rack/<int:rack_id>/add_nonnet_device', methods=['POST'])
-@permission_required('add_nonnet_device_to_rack')
-def rack_add_nonnet_device(rack_id):
-    device_name = request.form['device_name']
-    position_u = int(request.form['position_u'])
-    side = request.form['side']
-    user_name = get_current_user_name()
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        _, placement_error = check_rack_placement(cursor, rack_id, position_u, side)
-        if placement_error == 'Rack not found':
-            return placement_error, 404
-        if placement_error:
-            return render_rack_page(conn, rack_id, side, error=placement_error)
-        cursor.execute(
-            'INSERT INTO RackDevice (rack_id, device_id, position_u, side, nonnet_device_name) VALUES (%s, NULL, %s, %s, %s)',
-            (rack_id, position_u, side, device_name),
-        )
-        add_audit_log(
-            session['user_id'], 'rack_add_nonnet_device',
-            f"Added non-networked device '{device_name}' to rack '{rack_id}' U{position_u} ({side})",
-            conn=conn,
-        )
-        conn.commit()
-    logging.info(f"User {user_name} added non-networked device '{device_name}' to rack {rack_id} at U{position_u} ({side}).")
-    return redirect(url_for('rack', rack_id=rack_id))
 
-@app.route('/rack/<int:rack_id>/remove_device', methods=['POST'])
-@permission_required('remove_device_from_rack')
-def rack_remove_device(rack_id):
-    rack_device_id = int(request.form['rack_device_id'])
-    user_name = get_current_user_name()
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT device_id, nonnet_device_name, position_u, side FROM RackDevice WHERE id = %s', (rack_device_id,))
-        rd = cursor.fetchone()
-        if rd['device_id']:
-            cursor.execute('SELECT name FROM Device WHERE id = %s', (rd['device_id'],))
-            device_name_row = cursor.fetchone()
-            device_label = device_name_row['name'] if device_name_row and 'name' in device_name_row else rd['device_id']
-        else:
-            device_label = rd['nonnet_device_name']
-        cursor.execute('SELECT name FROM Rack WHERE id = %s', (rack_id,))
-        rack_name_row = cursor.fetchone()
-        rack_label = rack_name_row['name'] if rack_name_row and 'name' in rack_name_row else rack_id
-        add_audit_log(session['user_id'], 'rack_remove_device', f"Removed device '{device_label}' from rack '{rack_label}' U{rd['position_u']} ({rd['side']})", conn=conn)
-        cursor.execute('DELETE FROM RackDevice WHERE id = %s', (rack_device_id,))
-        conn.commit()
-    logging.info(f"User {user_name} removed device '{device_label}' from rack {rack_label} at U{rd['position_u']} ({rd['side']}).")
-    return redirect(url_for('rack', rack_id=rack_id))
-
-@app.route('/rack/<int:rack_id>/delete', methods=['POST'])
-@permission_required('delete_rack')
-def delete_rack(rack_id):
-    user_name = get_current_user_name()
-    from flask import current_app
+@app.route('/api/v2/account/change-password', methods=['POST'])
+@require_auth
+def api_account_change_password():
+    data = json_body()
+    current_pw = data.get('current_password') or ''
+    new_pw = data.get('new_password') or ''
+    if not current_pw or not new_pw:
+        return jsonify({'error': 'Current and new password required'}), 400
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT name FROM Rack WHERE id = %s', (rack_id,))
-        rack_name = cursor.fetchone()
-        cursor.execute('DELETE FROM Rack WHERE id = %s', (rack_id,))
-        add_audit_log(session['user_id'], 'delete_rack', f"Deleted rack '{rack_name[0] if rack_name else rack_id}'", conn=conn)
+        cursor.execute('SELECT password FROM User WHERE id = %s', (get_current_user_id(),))
+        row = cursor.fetchone()
+        if not row or not verify_password(current_pw, row[0]):
+            return jsonify({'error': 'Current password is incorrect'}), 401
+        cursor.execute('UPDATE User SET password = %s WHERE id = %s', (hash_password(new_pw), get_current_user_id()))
         conn.commit()
-    logging.info(f"User {user_name} deleted rack {rack_id}.")
-    return redirect(url_for('racks'))
+    return jsonify({'ok': True})
 
-@app.route('/rack/<int:rack_id>/export_csv')
-@permission_required('export_rack_csv')
-def export_rack_csv(rack_id):
-    from flask import current_app
+
+@app.route('/api/v2/account/disable-2fa', methods=['POST'])
+@require_auth
+def api_account_disable_2fa():
+    data = json_body()
+    password = data.get('password') or ''
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT * FROM Rack WHERE id = %s', (rack_id,))
-        rack = cursor.fetchone()
-        if not rack:
-            return 'Rack not found', 404
-        cursor.execute('SELECT * FROM RackDevice WHERE rack_id = %s', (rack_id,))
-        rack_devices = cursor.fetchall()
-        device_ids = [rd['device_id'] for rd in rack_devices]
-        device_names = {}
-        if device_ids:
-            format_strings = ','.join(['%s'] * len(device_ids))
-            cursor.execute(f'SELECT id, name FROM Device WHERE id IN ({format_strings})', tuple(device_ids))
-            for row in cursor.fetchall():
-                device_names[row['id']] = row['name']
-        for rd in rack_devices:
-            rd['device_name'] = device_names.get(rd['device_id'], 'Unknown')
-        output = StringIO()
-        writer = csv.writer(output)
-        writer.writerow([f"Rack: {rack['name']} ({rack['height_u']}U, {rack['site']})"])
-        writer.writerow([])
-        for side in ['front', 'back']:
-            writer.writerow([side.capitalize()])
-            writer.writerow(['U', 'Device'])
-            for u in range(rack['height_u'], 0, -1):
-                found = False
-                for rd in rack_devices:
-                    if rd['position_u'] == u and rd['side'] == side:
-                        writer.writerow([u, rd['device_name']])
-                        found = True
-                        break
-                if not found:
-                    writer.writerow([u, ''])
-            writer.writerow([])
-        csv_bytes = output.getvalue().encode('utf-8')
-        output_bytes = BytesIO(csv_bytes)
-        output_bytes.seek(0)
-        filename = f"{rack['name']}_rack.csv".replace(' ', '_')
-        return send_file(
-            output_bytes,
-            mimetype='text/csv',
-            as_attachment=True,
-            download_name=filename
-        )
+        cursor = conn.cursor()
+        cursor.execute('SELECT password, totp_enabled FROM User WHERE id = %s', (get_current_user_id(),))
+        row = cursor.fetchone()
+        if not row or not verify_password(password, row[0]):
+            return jsonify({'error': 'Password is incorrect'}), 401
+        if not row[1]:
+            return jsonify({'error': '2FA is not enabled'}), 400
+        cursor.execute('''
+            UPDATE User SET totp_secret = NULL, totp_enabled = FALSE, backup_codes = NULL, two_fa_setup_complete = FALSE
+            WHERE id = %s
+        ''', (get_current_user_id(),))
+        conn.commit()
+    return jsonify({'ok': True})
 
-@app.route('/search')
-@login_required
-def search():
-    query = request.args.get('q', '').strip()
-    results = {
-        'subnets': [],
-        'ips': [],
-        'devices': [],
-        'tags': [],
-        'racks': [],
-        'sites': []
-    }
-    
-    if query:
-        from flask import current_app
-        conn = get_db_connection(current_app)
-        try:
-            cursor = conn.cursor()
-            search_pattern = f'%{query}%'
-            
-            # Search Subnets (name, cidr, site)
-            cursor.execute('''
-                SELECT id, name, cidr, site 
-                FROM Subnet 
-                WHERE name LIKE %s OR cidr LIKE %s OR site LIKE %s
-                ORDER BY site, name
-            ''', (search_pattern, search_pattern, search_pattern))
-            results['subnets'] = [{'id': row[0], 'name': row[1], 'cidr': row[2], 'site': row[3] or 'Unassigned'} 
-                                 for row in cursor.fetchall()]
-            
-            # Search IP Addresses (ip, hostname, notes)
-            cursor.execute('''
-                SELECT ip.id, ip.ip, ip.hostname, ip.subnet_id, s.name, s.cidr, s.site
-                FROM IPAddress ip
-                JOIN Subnet s ON ip.subnet_id = s.id
-                WHERE ip.ip LIKE %s OR ip.hostname LIKE %s OR ip.notes LIKE %s
-                ORDER BY INET_ATON(ip.ip)
-            ''', (search_pattern, search_pattern, search_pattern))
-            results['ips'] = [{'id': row[0], 'ip': row[1], 'hostname': row[2], 
-                              'subnet_id': row[3], 'subnet_name': row[4], 
-                              'subnet_cidr': row[5], 'site': row[6] or 'Unassigned'} 
-                             for row in cursor.fetchall()]
-            
-            # Search Devices (name, description)
-            cursor.execute('''
-                SELECT id, name, description 
-                FROM Device 
-                WHERE name LIKE %s OR description LIKE %s
-                ORDER BY name
-            ''', (search_pattern, search_pattern))
-            results['devices'] = [{'id': row[0], 'name': row[1], 'description': row[2] or ''} 
-                                 for row in cursor.fetchall()]
-            
-            # Search Tags (name, description)
-            cursor.execute('''
-                SELECT id, name, description 
-                FROM Tag 
-                WHERE name LIKE %s OR description LIKE %s
-                ORDER BY name
-            ''', (search_pattern, search_pattern))
-            results['tags'] = [{'id': row[0], 'name': row[1], 'description': row[2] or ''} 
-                              for row in cursor.fetchall()]
-            
-            # Search Racks (name, site)
-            cursor.execute('''
-                SELECT id, name, site, height_u 
-                FROM Rack 
-                WHERE name LIKE %s OR site LIKE %s
-                ORDER BY site, name
-            ''', (search_pattern, search_pattern))
-            results['racks'] = [{'id': row[0], 'name': row[1], 'site': row[2], 'height_u': row[3]} 
-                               for row in cursor.fetchall()]
-            
-            # Get unique sites from subnets and racks
-            all_sites = set()
-            for subnet in results['subnets']:
-                all_sites.add(subnet['site'])
-            for rack in results['racks']:
-                all_sites.add(rack['site'])
-            for ip in results['ips']:
-                all_sites.add(ip['site'])
-            
-            # Filter sites that match the query
-            matching_sites = [site for site in all_sites if query.lower() in site.lower()]
-            results['sites'] = sorted(matching_sites)
-            
-        finally:
-            conn.close()
-    
-    return render_with_user('search.html', query=query, results=results)
 
-# ========== API ROUTES ==========
+@app.route('/api/v2/account/regenerate-backup-codes', methods=['POST'])
+@require_auth
+def api_account_regenerate_backup_codes():
+    data = json_body()
+    password = data.get('password') or ''
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT password, totp_enabled FROM User WHERE id = %s', (get_current_user_id(),))
+        row = cursor.fetchone()
+        if not row or not verify_password(password, row[0]):
+            return jsonify({'error': 'Password is incorrect'}), 401
+        if not row[1]:
+            return jsonify({'error': '2FA is not enabled'}), 400
+        backup_codes = generate_backup_codes()
+        cursor.execute('UPDATE User SET backup_codes = %s WHERE id = %s', (json.dumps(backup_codes), get_current_user_id()))
+        conn.commit()
+    return jsonify({'backup_codes': backup_codes})
 
-@app.route('/api/v1/info', methods=['GET'])
-@api_auth_required
+
+# ── API v2 routes ─────────────────────────────────────────────────────────────
+
+@app.route('/api/v2/info', methods=['GET'])
+@require_auth
 def api_info():
     """Get API information and authenticated user info"""
     return jsonify({
         'api_version': '2.0',
         'user': {
-            'id': request.api_user['id'],
-            'name': request.api_user['name'],
-            'email': request.api_user['email']
+            'id': get_current_user_id(),
+            'name': current_user()['name'],
+            'email': current_user()['email']
         }
     })
 
 # Devices API
-@app.route('/api/v1/devices', methods=['GET'])
-@api_permission_required('view_devices')
+@app.route('/api/v2/devices', methods=['GET'])
+@require_permission('view_devices')
 def api_devices():
     """Get all devices"""
-    from flask import current_app
+    tag_filter = request.args.get('tag')
+    site_filter = request.args.get('site')
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute('''
-            SELECT d.id, d.name, d.description, dt.name as device_type, dt.icon_class
-            FROM Device d
-            LEFT JOIN DeviceType dt ON d.device_type_id = dt.id
-            ORDER BY d.name
-        ''')
-        devices = cursor.fetchall()
-        for device in devices:
+        if tag_filter:
             cursor.execute('''
-                SELECT ip.id, ip.ip, ip.hostname, s.id as subnet_id, s.name as subnet_name, s.cidr, s.site
-                FROM DeviceIPAddress dia
+                SELECT DISTINCT d.id, d.name, d.description
+                FROM Device d
+                JOIN DeviceTag dtag ON d.id = dtag.device_id
+                JOIN Tag t ON dtag.tag_id = t.id
+                WHERE t.name = %s
+                ORDER BY d.name
+            ''', (tag_filter,))
+        elif site_filter:
+            site_val = None if site_filter == 'Unassigned' else site_filter
+            cursor.execute('''
+                SELECT DISTINCT d.id, d.name, d.description
+                FROM Device d
+                JOIN DeviceIPAddress dia ON d.id = dia.device_id
                 JOIN IPAddress ip ON dia.ip_id = ip.id
                 JOIN Subnet s ON ip.subnet_id = s.id
-                WHERE dia.device_id = %s
-            ''', (device['id'],))
-            device['ip_addresses'] = cursor.fetchall()
-            cursor.execute('''
-                SELECT t.id, t.name, t.color
-                FROM DeviceTag dt
-                JOIN Tag t ON dt.tag_id = t.id
-                WHERE dt.device_id = %s
-                ORDER BY t.name
-            ''', (device['id'],))
-            device['tags'] = cursor.fetchall()
-            # Get custom fields
-            cursor.execute('SELECT custom_fields FROM Device WHERE id = %s', (device['id'],))
-            cf_result = cursor.fetchone()
-            if cf_result and cf_result.get('custom_fields'):
-                try:
-                    device['custom_fields'] = json.loads(cf_result['custom_fields'])
-                except (json.JSONDecodeError, TypeError):
-                    device['custom_fields'] = {}
-            else:
-                device['custom_fields'] = {}
-    return jsonify({'devices': devices})
+                WHERE s.site <=> %s
+                ORDER BY d.name
+            ''', (site_val,))
+        else:
+            cursor.execute('SELECT id, name, description FROM Device ORDER BY name')
+        devices = cursor.fetchall()
+        enrich_devices_batch(cursor, devices)
+    return items_response(devices)
 
-@app.route('/api/v1/devices/<int:device_id>', methods=['GET'])
-@api_permission_required('view_device')
+@app.route('/api/v2/devices/<int:device_id>', methods=['GET'])
+@require_permission('view_device')
 def api_device(device_id):
     """Get a specific device"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
         cursor.execute('''
-            SELECT d.id, d.name, d.description, dt.name as device_type, dt.icon_class
+            SELECT d.id, d.name, d.description
             FROM Device d
-            LEFT JOIN DeviceType dt ON d.device_type_id = dt.id
             WHERE d.id = %s
         ''', (device_id,))
         device = cursor.fetchone()
@@ -3021,8 +1511,8 @@ def api_device(device_id):
             device['custom_fields'] = {}
     return jsonify(device)
 
-@app.route('/api/v1/devices', methods=['POST'])
-@api_permission_required('add_device')
+@app.route('/api/v2/devices', methods=['POST'])
+@require_permission('add_device')
 def api_add_device():
     """Create a new device"""
     data = request.get_json()
@@ -3031,20 +1521,19 @@ def api_add_device():
     
     name = data['name']
     description = data.get('description', '')
-    device_type_id = data.get('device_type_id', 1)
     
     from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO Device (name, description, device_type_id) VALUES (%s, %s, %s)',
-                      (name, description, device_type_id))
+        cursor.execute('INSERT INTO Device (name, description) VALUES (%s, %s)',
+                      (name, description))
         device_id = cursor.lastrowid
-        add_audit_log(request.api_user['id'], 'add_device', f"Added device {name}", conn=conn)
+        add_audit_log(get_current_user_id(), 'add_device', f"Added device {name}", conn=conn)
         conn.commit()
-    return jsonify({'id': device_id, 'name': name, 'description': description, 'device_type_id': device_type_id}), 201
+    return jsonify({'id': device_id, 'name': name, 'description': description}), 201
 
-@app.route('/api/v1/devices/<int:device_id>', methods=['PUT'])
-@api_permission_required('edit_device')
+@app.route('/api/v2/devices/<int:device_id>', methods=['PUT'])
+@require_permission('edit_device')
 def api_update_device(device_id):
     """Update a device"""
     data = request.get_json()
@@ -3054,11 +1543,11 @@ def api_update_device(device_id):
     from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT name, description, device_type_id FROM Device WHERE id = %s', (device_id,))
+        cursor.execute('SELECT name, description FROM Device WHERE id = %s', (device_id,))
         current = cursor.fetchone()
         if not current:
             return jsonify({'error': 'Device not found'}), 404
-        current_name, current_description, current_device_type = current
+        current_name, current_description = current
         
         updates = []
         values = []
@@ -3073,9 +1562,6 @@ def api_update_device(device_id):
         if 'description' in data and data['description'] != current_description:
             updates.append('description = %s')
             values.append(data['description'])
-        if 'device_type_id' in data and data['device_type_id'] != current_device_type:
-            updates.append('device_type_id = %s')
-            values.append(data['device_type_id'])
         
         if not updates:
             return jsonify({'error': 'No changes to apply'}), 400
@@ -3085,25 +1571,25 @@ def api_update_device(device_id):
         
         if rename:
             cursor.execute('UPDATE IPAddress SET hostname = %s WHERE hostname = %s', (new_name, current_name))
-            add_audit_log(request.api_user['id'], 'rename_device', f"Renamed device '{current_name}' to '{new_name}'", conn=conn)
+            add_audit_log(get_current_user_id(), 'rename_device', f"Renamed device '{current_name}' to '{new_name}'", conn=conn)
         
         conn.commit()
     return jsonify({'message': 'Device updated successfully', 'device': {'id': device_id, 'name': new_name}})
 
-@app.route('/api/v1/devices/<int:device_id>', methods=['DELETE'])
-@api_permission_required('delete_device')
+@app.route('/api/v2/devices/<int:device_id>', methods=['DELETE'])
+@require_permission('delete_device')
 def api_delete_device(device_id):
     """Delete a device"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
-        device_name = delete_device_record(conn, device_id, request.api_user['id'])
+        device_name = delete_device_record(conn, device_id, get_current_user_id())
         if not device_name:
             return jsonify({'error': 'Device not found'}), 404
         conn.commit()
     return jsonify({'message': 'Device deleted successfully', 'device': {'id': device_id, 'name': device_name}})
 
-@app.route('/api/v1/devices/<int:device_id>/ips', methods=['POST'])
-@api_permission_required('add_device_ip')
+@app.route('/api/v2/devices/<int:device_id>/ips', methods=['POST'])
+@require_permission('add_device_ip')
 def api_add_device_ip(device_id):
     """Add an IP address to a device"""
     data = request.get_json()
@@ -3114,7 +1600,7 @@ def api_add_device_ip(device_id):
     from flask import current_app
     try:
         with get_db_connection(current_app) as conn:
-            assign_ip_to_device(conn, device_id, ip_id, request.api_user['id'])
+            assign_ip_to_device(conn, device_id, ip_id, get_current_user_id())
             conn.commit()
     except ValueError as e:
         msg = str(e)
@@ -3123,8 +1609,8 @@ def api_add_device_ip(device_id):
         return jsonify({'error': msg}), 400
     return jsonify({'message': 'IP address added to device successfully', 'ip_id': ip_id}), 201
 
-@app.route('/api/v1/devices/<int:device_id>/ips/<int:ip_id>', methods=['DELETE'])
-@api_permission_required('remove_device_ip')
+@app.route('/api/v2/devices/<int:device_id>/ips/<int:ip_id>', methods=['DELETE'])
+@require_permission('remove_device_ip')
 def api_remove_device_ip(device_id, ip_id):
     """Remove an IP address from a device"""
     from flask import current_app
@@ -3150,40 +1636,32 @@ def api_remove_device_ip(device_id, ip_id):
             details = f"Removed IP {ip} ({subnet_name} {subnet_cidr}) from device {device_name}"
         else:
             details = f"Removed IP {ip} from device {device_name}"
-        add_audit_log(request.api_user['id'], 'device_delete_ip', details, subnet_id, conn=conn)
+        add_audit_log(get_current_user_id(), 'device_delete_ip', details, subnet_id, conn=conn)
         conn.commit()
     return jsonify({'message': 'IP address removed from device successfully', 'ip_id': ip_id})
 
 # Subnets API
-@app.route('/api/v1/subnets', methods=['GET'])
-@api_permission_required('view_subnet')
+@app.route('/api/v2/subnets', methods=['GET'])
+@require_permission('view_subnet')
 def api_subnets():
     """Get all subnets"""
-    from flask import current_app
+    include_util = request.args.get('include') == 'utilization'
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT id, name, cidr, site, vlan_id, vlan_description, vlan_notes FROM Subnet ORDER BY site, name')
+        cursor.execute('SELECT id, name, cidr, site, vlan_id, vlan_description, vlan_notes, custom_fields FROM Subnet ORDER BY site, name')
         subnets = cursor.fetchall()
+        utils = get_all_subnet_utilizations(cursor) if include_util else {}
         for subnet in subnets:
-            cursor.execute('SELECT COUNT(*) as total, COUNT(CASE WHEN hostname IS NOT NULL THEN 1 END) as used FROM IPAddress WHERE subnet_id = %s', (subnet['id'],))
-            stats = cursor.fetchone()
-            subnet['total_ips'] = stats['total']
-            subnet['used_ips'] = stats['used']
-            subnet['available_ips'] = stats['total'] - stats['used']
-            # Get custom fields
-            cursor.execute('SELECT custom_fields FROM Subnet WHERE id = %s', (subnet['id'],))
-            cf_result = cursor.fetchone()
-            if cf_result and cf_result.get('custom_fields'):
-                try:
-                    subnet['custom_fields'] = json.loads(cf_result['custom_fields'])
-                except (json.JSONDecodeError, TypeError):
-                    subnet['custom_fields'] = {}
-            else:
-                subnet['custom_fields'] = {}
-    return jsonify({'subnets': subnets})
+            subnet['custom_fields'] = parse_custom_fields_json(subnet.pop('custom_fields', None))
+            if include_util:
+                u = utils.get(subnet['id'], {'total': 0, 'used': 0, 'percent': 0})
+                subnet['utilization'] = u['percent']
+                subnet['total_ips'] = u['total']
+                subnet['used_ips'] = u['used']
+    return items_response(subnets)
 
-@app.route('/api/v1/subnets/<int:subnet_id>', methods=['GET'])
-@api_permission_required('view_subnet')
+@app.route('/api/v2/subnets/<int:subnet_id>', methods=['GET'])
+@require_permission('view_subnet')
 def api_subnet(subnet_id):
     """Get a specific subnet with IP addresses"""
     from flask import current_app
@@ -3194,7 +1672,7 @@ def api_subnet(subnet_id):
         if not subnet:
             return jsonify({'error': 'Subnet not found'}), 404
         cursor.execute('''
-            SELECT ip.id, ip.ip, ip.hostname, d.id as device_id, d.name as device_name
+            SELECT ip.id, ip.ip, ip.hostname, ip.notes, d.id as device_id, d.name as device_name, d.description
             FROM IPAddress ip
             LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
             LEFT JOIN Device d ON dia.device_id = d.id
@@ -3214,8 +1692,8 @@ def api_subnet(subnet_id):
             subnet['custom_fields'] = {}
     return jsonify(subnet)
 
-@app.route('/api/v1/subnets/<int:subnet_id>/next_free_ip', methods=['GET'])
-@api_permission_required('view_subnet')
+@app.route('/api/v2/subnets/<int:subnet_id>/next_free_ip', methods=['GET'])
+@require_permission('view_subnet')
 def api_subnet_next_free_ip(subnet_id):
     """Get the next free IP address in a subnet"""
     from flask import current_app
@@ -3241,8 +1719,8 @@ def api_subnet_next_free_ip(subnet_id):
         
         return jsonify({'id': result['id'], 'ip': result['ip']})
 
-@app.route('/api/v1/subnets', methods=['POST'])
-@api_permission_required('add_subnet')
+@app.route('/api/v2/subnets', methods=['POST'])
+@require_permission('add_subnet')
 def api_add_subnet():
     """Create a new subnet"""
     data = request.get_json()
@@ -3267,7 +1745,7 @@ def api_add_subnet():
     try:
         with get_db_connection(current_app) as conn:
             subnet_id = create_subnet_from_cidr(
-                conn, name, cidr, site, vlan_id, vlan_description, vlan_notes, request.api_user['id'],
+                conn, name, cidr, site, vlan_id, vlan_description, vlan_notes, get_current_user_id(),
             )
             conn.commit()
     except ValueError as exc:
@@ -3285,8 +1763,8 @@ def api_add_subnet():
         'vlan_notes': vlan_notes if vlan_notes else None
     }), 201
 
-@app.route('/api/v1/subnets/<int:subnet_id>', methods=['PUT'])
-@api_permission_required('edit_subnet')
+@app.route('/api/v2/subnets/<int:subnet_id>', methods=['PUT'])
+@require_permission('edit_subnet')
 def api_update_subnet(subnet_id):
     """Update a subnet"""
     data = request.get_json()
@@ -3355,7 +1833,7 @@ def api_update_subnet(subnet_id):
         cursor.execute(f'UPDATE Subnet SET {", ".join(updates)} WHERE id = %s', values)
         vlan_info = f" (VLAN {new_vlan_id})" if new_vlan_id else ""
         add_audit_log(
-            request.api_user['id'],
+            get_current_user_id(),
             'edit_subnet',
             f"Edited subnet from {old_name} ({old_cidr}) to {new_name} ({new_cidr}) at site {new_site or 'Unassigned'}{vlan_info}",
             subnet_id,
@@ -3375,8 +1853,8 @@ def api_update_subnet(subnet_id):
         }
     })
 
-@app.route('/api/v1/subnets/<int:subnet_id>', methods=['DELETE'])
-@api_permission_required('delete_subnet')
+@app.route('/api/v2/subnets/<int:subnet_id>', methods=['DELETE'])
+@require_permission('delete_subnet')
 def api_delete_subnet(subnet_id):
     """Delete a subnet"""
     from flask import current_app
@@ -3395,13 +1873,13 @@ def api_delete_subnet(subnet_id):
         cursor.execute('UPDATE AuditLog SET subnet_id = NULL WHERE subnet_id = %s', (subnet_id,))
         cursor.execute('DELETE FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
         cursor.execute('DELETE FROM Subnet WHERE id = %s', (subnet_id,))
-        add_audit_log(request.api_user['id'], 'delete_subnet', f"Deleted subnet {subnet_name} ({subnet_cidr})", subnet_id, conn=conn)
+        add_audit_log(get_current_user_id(), 'delete_subnet', f"Deleted subnet {subnet_name} ({subnet_cidr})", subnet_id, conn=conn)
         conn.commit()
     return jsonify({'message': 'Subnet deleted successfully', 'subnet': {'id': subnet_id, 'name': subnet_name, 'cidr': subnet_cidr}})
 
 # Racks API
-@app.route('/api/v1/racks', methods=['GET'])
-@api_permission_required('view_racks')
+@app.route('/api/v2/racks', methods=['GET'])
+@require_permission('view_racks')
 def api_racks():
     """Get all racks"""
     from flask import current_app
@@ -3425,30 +1903,59 @@ def api_racks():
             rack['devices'] = cursor.fetchall()
     return jsonify({'racks': racks})
 
-@app.route('/api/v1/racks/<int:rack_id>', methods=['GET'])
-@api_permission_required('view_rack')
+@app.route('/api/v2/racks/<int:rack_id>', methods=['GET'])
+@require_permission('view_rack')
 def api_rack(rack_id):
     """Get a specific rack"""
     from flask import current_app
+    with get_db_connection(current_app) as conn:
+        ctx = load_rack_view(conn, rack_id)
+        if not ctx:
+            return jsonify({'error': 'Rack not found'}), 404
+        rack = ctx['rack']
+        rack['devices'] = [
+            {
+                'id': rd['id'],
+                'position_u': rd['position_u'],
+                'side': rd['side'],
+                'device_id': rd['device_id'],
+                'device_name': rd.get('device_name'),
+                'nonnet_device_name': rd.get('nonnet_device_name'),
+            }
+            for rd in ctx['rack_devices']
+        ]
+        rack['site_devices'] = ctx['site_devices']
+    return jsonify(rack)
+
+@app.route('/api/v2/racks/<int:rack_id>', methods=['PUT'])
+@require_permission('add_rack')
+def api_update_rack(rack_id):
+    """Update a rack"""
+    data = json_body()
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id, name, site, height_u FROM Rack WHERE id = %s', (rack_id,))
         rack = cursor.fetchone()
         if not rack:
             return jsonify({'error': 'Rack not found'}), 404
-        cursor.execute('''
-            SELECT rd.id, rd.position_u, rd.side, rd.device_id, rd.nonnet_device_name,
-                   d.name as device_name
-            FROM RackDevice rd
-            LEFT JOIN Device d ON rd.device_id = d.id
-            WHERE rd.rack_id = %s
-            ORDER BY rd.position_u, rd.side
-        ''', (rack_id,))
-        rack['devices'] = cursor.fetchall()
-    return jsonify(rack)
+        name = (data.get('name') or rack['name']).strip()
+        site = (data.get('site') or rack['site']).strip()
+        height_u = data.get('height_u', rack['height_u'])
+        try:
+            height_u = int(height_u)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'height_u must be an integer'}), 400
+        if height_u <= 0:
+            return jsonify({'error': 'height_u must be greater than zero'}), 400
+        cursor.execute('UPDATE Rack SET name = %s, site = %s, height_u = %s WHERE id = %s',
+                       (name, site, height_u, rack_id))
+        add_audit_log(get_current_user_id(), 'edit_rack',
+                      f"Updated rack '{rack['name']}' to '{name}' at site '{site}' ({height_u}U)", conn=conn)
+        conn.commit()
+    return jsonify({'id': rack_id, 'name': name, 'site': site, 'height_u': height_u})
 
-@app.route('/api/v1/racks', methods=['POST'])
-@api_permission_required('add_rack')
+@app.route('/api/v2/racks', methods=['POST'])
+@require_permission('add_rack')
 def api_add_rack():
     """Create a new rack"""
     from flask import current_app
@@ -3470,12 +1977,12 @@ def api_add_rack():
         cursor = conn.cursor()
         cursor.execute('INSERT INTO Rack (name, site, height_u) VALUES (%s, %s, %s)', (name, site, height_u))
         rack_id = cursor.lastrowid
-        add_audit_log(request.api_user['id'], 'add_rack', f"Added rack '{name}' at site '{site}' ({height_u}U)", conn=conn)
+        add_audit_log(get_current_user_id(), 'add_rack', f"Added rack '{name}' at site '{site}' ({height_u}U)", conn=conn)
         conn.commit()
     return jsonify({'id': rack_id, 'name': name, 'site': site, 'height_u': height_u}), 201
 
-@app.route('/api/v1/racks/<int:rack_id>', methods=['DELETE'])
-@api_permission_required('delete_rack')
+@app.route('/api/v2/racks/<int:rack_id>', methods=['DELETE'])
+@require_permission('delete_rack')
 def api_delete_rack(rack_id):
     """Delete a rack"""
     from flask import current_app
@@ -3487,12 +1994,12 @@ def api_delete_rack(rack_id):
             return jsonify({'error': 'Rack not found'}), 404
         rack_name = rack[0]
         cursor.execute('DELETE FROM Rack WHERE id = %s', (rack_id,))
-        add_audit_log(request.api_user['id'], 'delete_rack', f"Deleted rack '{rack_name}'", conn=conn)
+        add_audit_log(get_current_user_id(), 'delete_rack', f"Deleted rack '{rack_name}'", conn=conn)
         conn.commit()
     return jsonify({'message': 'Rack deleted successfully', 'rack': {'id': rack_id, 'name': rack_name}})
 
-@app.route('/api/v1/racks/<int:rack_id>/devices', methods=['POST'])
-@api_permission_required('add_device_to_rack')
+@app.route('/api/v2/racks/<int:rack_id>/devices', methods=['POST'])
+@require_permission('add_device_to_rack')
 def api_add_device_to_rack(rack_id):
     """Add a device to a rack"""
     from flask import current_app
@@ -3560,7 +2067,7 @@ def api_add_device_to_rack(rack_id):
             details = f"Added non-networked device '{device_name}' to rack '{rack['name']}' U{position_u} ({side})"
         
         rack_device_id = cursor.lastrowid
-        add_audit_log(request.api_user['id'], action, details, conn=conn)
+        add_audit_log(get_current_user_id(), action, details, conn=conn)
         conn.commit()
     return jsonify({
         'message': 'Device added to rack successfully',
@@ -3575,8 +2082,8 @@ def api_add_device_to_rack(rack_id):
         }
     }), 201
 
-@app.route('/api/v1/racks/<int:rack_id>/devices/<int:rack_device_id>', methods=['DELETE'])
-@api_permission_required('remove_device_from_rack')
+@app.route('/api/v2/racks/<int:rack_id>/devices/<int:rack_device_id>', methods=['DELETE'])
+@require_permission('remove_device_from_rack')
 def api_remove_device_from_rack(rack_id, rack_device_id):
     """Remove a device from a rack"""
     from flask import current_app
@@ -3599,7 +2106,7 @@ def api_remove_device_from_rack(rack_id, rack_device_id):
             device_label = rd['nonnet_device_name']
         cursor.execute('DELETE FROM RackDevice WHERE id = %s AND rack_id = %s', (rack_device_id, rack_id))
         add_audit_log(
-            request.api_user['id'],
+            get_current_user_id(),
             'rack_remove_device',
             f"Removed device '{device_label}' from rack '{rd['rack_name']}' U{rd['position_u']} ({rd['side']})",
             conn=conn
@@ -3608,8 +2115,8 @@ def api_remove_device_from_rack(rack_id, rack_device_id):
     return jsonify({'message': 'Device removed from rack successfully', 'rack_device_id': rack_device_id})
 
 # Custom Fields API
-@app.route('/api/v1/custom_fields/<entity_type>', methods=['GET'])
-@api_permission_required('view_custom_fields')
+@app.route('/api/v2/custom_fields/<entity_type>', methods=['GET'])
+@require_permission('view_custom_fields')
 def api_custom_fields_by_type(entity_type):
     """Get custom field definitions for a specific entity type"""
     if entity_type not in ['device', 'subnet']:
@@ -3635,8 +2142,8 @@ def api_custom_fields_by_type(entity_type):
                     field['validation_rules'] = {}
     return jsonify({'fields': fields})
 
-@app.route('/api/v1/custom_fields', methods=['POST'])
-@api_permission_required('manage_custom_fields')
+@app.route('/api/v2/custom_fields', methods=['POST'])
+@require_permission('manage_custom_fields')
 def api_add_custom_field():
     """Create a new custom field definition"""
     data = request.get_json()
@@ -3669,15 +2176,15 @@ def api_add_custom_field():
                   data.get('help_text'), data.get('display_order', 0),
                   validation_rules_json))
             field_id = cursor.lastrowid
-            add_audit_log(request.api_user['id'], 'add_custom_field',
+            add_audit_log(get_current_user_id(), 'add_custom_field',
                         f"Added custom field '{data['name']}' for {entity_type}", conn=conn)
             conn.commit()
             return jsonify({'id': field_id, 'message': 'Custom field created successfully'}), 201
         except mysql.connector.IntegrityError:
             return jsonify({'error': f'Field key "{data["field_key"]}" already exists'}), 400
 
-@app.route('/api/v1/custom_fields/<int:field_id>', methods=['PUT'])
-@api_permission_required('manage_custom_fields')
+@app.route('/api/v2/custom_fields/<int:field_id>', methods=['PUT'])
+@require_permission('manage_custom_fields')
 def api_update_custom_field(field_id):
     """Update a custom field definition"""
     data = request.get_json()
@@ -3722,13 +2229,13 @@ def api_update_custom_field(field_id):
         
         values.append(field_id)
         cursor.execute(f'UPDATE CustomFieldDefinition SET {", ".join(updates)} WHERE id = %s', values)
-        add_audit_log(request.api_user['id'], 'edit_custom_field',
+        add_audit_log(get_current_user_id(), 'edit_custom_field',
                      f"Updated custom field {field_id}", conn=conn)
         conn.commit()
     return jsonify({'message': 'Custom field updated successfully'})
 
-@app.route('/api/v1/custom_fields/<int:field_id>', methods=['DELETE'])
-@api_permission_required('manage_custom_fields')
+@app.route('/api/v2/custom_fields/<int:field_id>', methods=['DELETE'])
+@require_permission('manage_custom_fields')
 def api_delete_custom_field(field_id):
     """Delete a custom field definition"""
     from flask import current_app
@@ -3740,26 +2247,14 @@ def api_delete_custom_field(field_id):
             return jsonify({'error': 'Custom field not found'}), 404
         
         cursor.execute('DELETE FROM CustomFieldDefinition WHERE id = %s', (field_id,))
-        add_audit_log(request.api_user['id'], 'delete_custom_field',
+        add_audit_log(get_current_user_id(), 'delete_custom_field',
                      f"Deleted custom field '{field['name']}'", conn=conn)
         conn.commit()
     return jsonify({'message': 'Custom field deleted successfully'})
 
-# Device Types API
-@app.route('/api/v1/device-types', methods=['GET'])
-@api_permission_required('view_device_types')
-def api_device_types():
-    """Get all device types"""
-    from flask import current_app
-    with get_db_connection(current_app) as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT id, name, icon_class FROM DeviceType ORDER BY name')
-        device_types = cursor.fetchall()
-    return jsonify({'device_types': device_types})
-
 # DHCP API
-@app.route('/api/v1/subnets/<int:subnet_id>/dhcp', methods=['GET'])
-@api_permission_required('view_dhcp')
+@app.route('/api/v2/subnets/<int:subnet_id>/dhcp', methods=['GET'])
+@require_permission('view_dhcp')
 def api_get_dhcp(subnet_id):
     """Get DHCP pools for a subnet"""
     from flask import current_app
@@ -3769,8 +2264,8 @@ def api_get_dhcp(subnet_id):
         pools = cursor.fetchall()
     return jsonify({'pools': pools})
 
-@app.route('/api/v1/subnets/<int:subnet_id>/dhcp', methods=['POST'])
-@api_permission_required('configure_dhcp')
+@app.route('/api/v2/subnets/<int:subnet_id>/dhcp', methods=['POST'])
+@require_permission('configure_dhcp')
 def api_configure_dhcp(subnet_id):
     """Configure DHCP pools for a subnet"""
     data = request.get_json()
@@ -3786,7 +2281,7 @@ def api_configure_dhcp(subnet_id):
         subnet_name, subnet_cidr = subnet
         
         if data.get('remove'):
-            remove_dhcp_pool(cursor, subnet_id, subnet_name, subnet_cidr, request.api_user['id'], conn)
+            remove_dhcp_pool(cursor, subnet_id, subnet_name, subnet_cidr, get_current_user_id(), conn)
             conn.commit()
             return jsonify({'message': 'DHCP pool removed successfully'})
         
@@ -3809,7 +2304,7 @@ def api_configure_dhcp(subnet_id):
         try:
             result = configure_dhcp_pool(
                 cursor, subnet_id, start_ip, end_ip, excluded_str,
-                subnet_name, subnet_cidr, request.api_user['id'], conn, is_update,
+                subnet_name, subnet_cidr, get_current_user_id(), conn, is_update,
             )
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
@@ -3820,8 +2315,8 @@ def api_configure_dhcp(subnet_id):
     })
 
 # Tags API
-@app.route('/api/v1/tags', methods=['GET'])
-@api_permission_required('view_tags')
+@app.route('/api/v2/tags', methods=['GET'])
+@require_permission('view_tags')
 def api_tags():
     """Get all tags"""
     from flask import current_app
@@ -3834,8 +2329,8 @@ def api_tags():
             tag['device_count'] = cursor.fetchone()['device_count']
     return jsonify({'tags': tags})
 
-@app.route('/api/v1/tags', methods=['POST'])
-@api_permission_required('add_tag')
+@app.route('/api/v2/tags', methods=['POST'])
+@require_permission('add_tag')
 def api_add_tag():
     """Create a new tag"""
     data = request.get_json()
@@ -3854,14 +2349,14 @@ def api_add_tag():
         try:
             cursor.execute('INSERT INTO Tag (name, color, description) VALUES (%s, %s, %s)', (name, color, description))
             tag_id = cursor.lastrowid
-            add_audit_log(request.api_user['id'], 'add_tag', f"Added tag '{name}'", conn=conn)
+            add_audit_log(get_current_user_id(), 'add_tag', f"Added tag '{name}'", conn=conn)
             conn.commit()
             return jsonify({'id': tag_id, 'name': name, 'color': color, 'description': description}), 201
         except mysql.connector.IntegrityError:
             return jsonify({'error': 'Tag name already exists'}), 400
 
-@app.route('/api/v1/tags/<int:tag_id>', methods=['GET'])
-@api_permission_required('view_tags')
+@app.route('/api/v2/tags/<int:tag_id>', methods=['GET'])
+@require_permission('view_tags')
 def api_tag(tag_id):
     """Get a specific tag"""
     from flask import current_app
@@ -3872,18 +2367,17 @@ def api_tag(tag_id):
         if not tag:
             return jsonify({'error': 'Tag not found'}), 404
         cursor.execute('''
-            SELECT d.id, d.name, d.description, dt.name as device_type
+            SELECT d.id, d.name, d.description
             FROM DeviceTag dtag
             JOIN Device d ON dtag.device_id = d.id
-            LEFT JOIN DeviceType dt ON d.device_type_id = dt.id
             WHERE dtag.tag_id = %s
             ORDER BY d.name
         ''', (tag_id,))
         tag['devices'] = cursor.fetchall()
     return jsonify(tag)
 
-@app.route('/api/v1/tags/<int:tag_id>', methods=['PUT'])
-@api_permission_required('edit_tag')
+@app.route('/api/v2/tags/<int:tag_id>', methods=['PUT'])
+@require_permission('edit_tag')
 def api_update_tag(tag_id):
     """Update a tag"""
     data = request.get_json()
@@ -3922,14 +2416,14 @@ def api_update_tag(tag_id):
         values.append(tag_id)
         try:
             cursor.execute(f'UPDATE Tag SET {", ".join(updates)} WHERE id = %s', values)
-            add_audit_log(request.api_user['id'], 'edit_tag', f"Updated tag '{current_name}'", conn=conn)
+            add_audit_log(get_current_user_id(), 'edit_tag', f"Updated tag '{current_name}'", conn=conn)
             conn.commit()
             return jsonify({'message': 'Tag updated successfully'})
         except mysql.connector.IntegrityError:
             return jsonify({'error': 'Tag name already exists'}), 400
 
-@app.route('/api/v1/tags/<int:tag_id>', methods=['DELETE'])
-@api_permission_required('delete_tag')
+@app.route('/api/v2/tags/<int:tag_id>', methods=['DELETE'])
+@require_permission('delete_tag')
 def api_delete_tag(tag_id):
     """Delete a tag"""
     from flask import current_app
@@ -3941,12 +2435,12 @@ def api_delete_tag(tag_id):
             return jsonify({'error': 'Tag not found'}), 404
         tag_name = tag[0]
         cursor.execute('DELETE FROM Tag WHERE id = %s', (tag_id,))
-        add_audit_log(request.api_user['id'], 'delete_tag', f"Deleted tag '{tag_name}'", conn=conn)
+        add_audit_log(get_current_user_id(), 'delete_tag', f"Deleted tag '{tag_name}'", conn=conn)
         conn.commit()
     return jsonify({'message': 'Tag deleted successfully'})
 
-@app.route('/api/v1/devices/<int:device_id>/tags', methods=['GET'])
-@api_permission_required('view_device')
+@app.route('/api/v2/devices/<int:device_id>/tags', methods=['GET'])
+@require_permission('view_device')
 def api_device_tags(device_id):
     """Get tags for a specific device"""
     from flask import current_app
@@ -3965,8 +2459,8 @@ def api_device_tags(device_id):
         tags = cursor.fetchall()
     return jsonify({'tags': tags})
 
-@app.route('/api/v1/devices/<int:device_id>/tags', methods=['POST'])
-@api_permission_required('assign_device_tag')
+@app.route('/api/v2/devices/<int:device_id>/tags', methods=['POST'])
+@require_permission('assign_device_tag')
 def api_assign_device_tag(device_id):
     """Assign a tag to a device"""
     data = request.get_json()
@@ -3976,7 +2470,7 @@ def api_assign_device_tag(device_id):
     tag_id = data['tag_id']
     with get_db_connection(current_app) as conn:
         try:
-            assign_tag_to_device(conn, device_id, tag_id, request.api_user['id'])
+            assign_tag_to_device(conn, device_id, tag_id, get_current_user_id())
             conn.commit()
         except ValueError as exc:
             msg = str(exc)
@@ -3987,13 +2481,13 @@ def api_assign_device_tag(device_id):
             return jsonify({'error': msg}), 400
     return jsonify({'message': 'Tag assigned successfully'})
 
-@app.route('/api/v1/devices/<int:device_id>/tags/<int:tag_id>', methods=['DELETE'])
-@api_permission_required('remove_device_tag')
+@app.route('/api/v2/devices/<int:device_id>/tags/<int:tag_id>', methods=['DELETE'])
+@require_permission('remove_device_tag')
 def api_remove_device_tag(device_id, tag_id):
     """Remove a tag from a device"""
     with get_db_connection(current_app) as conn:
         try:
-            remove_tag_from_device(conn, device_id, tag_id, request.api_user['id'])
+            remove_tag_from_device(conn, device_id, tag_id, get_current_user_id())
             conn.commit()
         except ValueError as exc:
             msg = str(exc)
@@ -4004,8 +2498,8 @@ def api_remove_device_tag(device_id, tag_id):
             return jsonify({'error': msg}), 400
     return jsonify({'message': 'Tag removed successfully'})
 
-@app.route('/api/v1/devices/by-tag/<tag_identifier>', methods=['GET'])
-@api_permission_required('view_devices')
+@app.route('/api/v2/devices/by-tag/<tag_identifier>', methods=['GET'])
+@require_permission('view_devices')
 def api_devices_by_tag(tag_identifier):
     """Get devices by tag name or ID. Use ?format=simple for simplified response."""
     from flask import current_app
@@ -4028,10 +2522,9 @@ def api_devices_by_tag(tag_identifier):
                 ''', (tag_id,))
             else:
                 cursor.execute('''
-                    SELECT d.id, d.name, d.description, dt.name as device_type, dt.icon_class
+                    SELECT d.id, d.name, d.description
                     FROM DeviceTag dtag
                     JOIN Device d ON dtag.device_id = d.id
-                    LEFT JOIN DeviceType dt ON d.device_type_id = dt.id
                     WHERE dtag.tag_id = %s
                     ORDER BY d.name
                 ''', (tag_id,))
@@ -4055,11 +2548,10 @@ def api_devices_by_tag(tag_identifier):
                 ''', (tag_name,))
             else:
                 cursor.execute('''
-                    SELECT d.id, d.name, d.description, dt.name as device_type, dt.icon_class
+                    SELECT d.id, d.name, d.description
                     FROM DeviceTag dtag
                     JOIN Device d ON dtag.device_id = d.id
                     JOIN Tag t ON dtag.tag_id = t.id
-                    LEFT JOIN DeviceType dt ON d.device_type_id = dt.id
                     WHERE t.name = %s
                     ORDER BY d.name
                 ''', (tag_name,))
@@ -4116,8 +2608,8 @@ def api_devices_by_tag(tag_identifier):
             return jsonify({'devices': devices, 'tag_name': tag_name, 'count': len(devices)})
 
 # Audit Log API
-@app.route('/api/v1/audit', methods=['GET'])
-@api_permission_required('view_audit')
+@app.route('/api/v2/audit', methods=['GET'])
+@require_permission('view_audit')
 def api_audit():
     """Get audit log entries"""
     from flask import current_app
@@ -4136,8 +2628,8 @@ def api_audit():
     return jsonify({'logs': logs})
 
 # Users API (admin only)
-@app.route('/api/v1/users', methods=['GET'])
-@api_permission_required('view_users')
+@app.route('/api/v2/users', methods=['GET'])
+@require_permission('view_users')
 def api_users():
     """Get all users (admin only)"""
     from flask import current_app
@@ -4156,14 +2648,14 @@ def api_users():
     return jsonify({'users': users})
 
 # Roles API (admin only)
-@app.route('/api/v1/roles', methods=['GET'])
-@api_permission_required('view_users')
+@app.route('/api/v2/roles', methods=['GET'])
+@require_permission('view_users')
 def api_roles():
     """Get all roles (admin only)"""
     from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT id, name, description FROM Role ORDER BY name')
+        cursor.execute('SELECT id, name, description, require_2fa FROM Role ORDER BY name')
         roles = cursor.fetchall()
         for role in roles:
             cursor.execute('''
@@ -4176,177 +2668,453 @@ def api_roles():
     return jsonify({'roles': roles})
 
 
+# ── Extended v2 endpoints ─────────────────────────────────────────────────────
 
-# Bulk Operations
-@app.route('/bulk', methods=['GET'])
-@permission_required('view_devices')
-def bulk_operations():
-    from flask import current_app
+@app.route('/api/v2/dashboard', methods=['GET'])
+@require_permission('view_index')
+def api_dashboard():
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name FROM Device ORDER BY name')
-        devices = cursor.fetchall()
-        cursor.execute('SELECT id, name, cidr, site FROM Subnet ORDER BY site, name')
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet ORDER BY site, name')
         subnets = cursor.fetchall()
-        
-        cursor.execute('SELECT id, name FROM Tag ORDER BY name')
-        tags = cursor.fetchall()
-        
-        cursor.execute('SELECT id, name FROM DeviceType ORDER BY name')
-        device_types = cursor.fetchall()
-    return render_with_user('bulk_operations.html', 
-                           devices=devices, 
-                           subnets=subnets, 
-                           tags=tags,
-                           device_types=device_types,
-                           can_add_device_ip=has_permission('add_device_ip'),
-                           can_add_device=has_permission('add_device'),
-                           can_assign_device_tag=has_permission('assign_device_tag'),
-                           can_export_subnet_csv=has_permission('export_subnet_csv'))
+        utils = get_all_subnet_utilizations(cursor)
+        sites = {}
+        for s in subnets:
+            site = s['site'] or 'Unassigned'
+            util = utils.get(s['id'], {'percent': 0})
+            sites.setdefault(site, []).append({
+                'id': s['id'], 'name': s['name'], 'cidr': s['cidr'],
+                'vlan_id': s['vlan_id'], 'utilization': util['percent'],
+            })
+    return jsonify({'sites': sites})
 
-@app.route('/bulk/assign_ips', methods=['POST'])
-@permission_required('add_device_ip')
-def bulk_assign_ips():
-    device_id = request.form['device_id']
-    ip_ids = request.form.getlist('ip_ids[]')
-    user_name = get_current_user_name()
-    results = {'success': [], 'failed': []}
-    
+
+@app.route('/api/v2/search', methods=['GET'])
+@require_auth
+def api_search():
+    query = (request.args.get('q') or '').strip()
+    results = {'subnets': [], 'ips': [], 'devices': [], 'tags': [], 'racks': [], 'sites': []}
+    if not query:
+        return jsonify(results)
+    pattern = f'%{query}%'
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        if not get_device_name(cursor, device_id):
-            return jsonify({'success': [], 'failed': [{'ip_id': 'all', 'reason': 'Device not found'}]})
-        
-        for ip_id in ip_ids:
-            try:
-                ip = assign_ip_to_device(conn, device_id, ip_id, session['user_id'])
-                results['success'].append({'ip_id': ip_id, 'ip': ip})
-            except ValueError as e:
-                results['failed'].append({'ip_id': ip_id, 'reason': str(e)})
-            except Exception as e:
-                results['failed'].append({'ip_id': ip_id, 'reason': str(e)})
-        
-        conn.commit()
-    
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('''
+            SELECT id, name, cidr, site FROM Subnet
+            WHERE name LIKE %s OR cidr LIKE %s OR site LIKE %s ORDER BY site, name
+        ''', (pattern, pattern, pattern))
+        results['subnets'] = [{**r, 'site': r['site'] or 'Unassigned'} for r in cursor.fetchall()]
+        cursor.execute('''
+            SELECT ip.id, ip.ip, ip.hostname, ip.subnet_id, s.name as subnet_name, s.cidr, s.site
+            FROM IPAddress ip JOIN Subnet s ON ip.subnet_id = s.id
+            WHERE ip.ip LIKE %s OR ip.hostname LIKE %s OR ip.notes LIKE %s
+            ORDER BY INET_ATON(ip.ip)
+        ''', (pattern, pattern, pattern))
+        results['ips'] = [{**r, 'site': r['site'] or 'Unassigned'} for r in cursor.fetchall()]
+        cursor.execute('SELECT id, name, description FROM Device WHERE name LIKE %s OR description LIKE %s ORDER BY name', (pattern, pattern))
+        results['devices'] = cursor.fetchall()
+        cursor.execute('SELECT id, name, description FROM Tag WHERE name LIKE %s OR description LIKE %s ORDER BY name', (pattern, pattern))
+        results['tags'] = cursor.fetchall()
+        cursor.execute('SELECT id, name, site, height_u FROM Rack WHERE name LIKE %s OR site LIKE %s ORDER BY site, name', (pattern, pattern))
+        results['racks'] = cursor.fetchall()
+        all_sites = {x['site'] for x in results['subnets']} | {x['site'] for x in results['racks']} | {x['site'] for x in results['ips']}
+        results['sites'] = sorted(s for s in all_sites if query.lower() in s.lower())
     return jsonify(results)
 
-@app.route('/bulk/create_devices', methods=['POST'])
-@permission_required('add_device')
-def bulk_create_devices():
-    device_names = request.form.get('device_names', '').strip().split('\n')
-    device_type_id = int(request.form.get('device_type', 1))
-    user_name = get_current_user_name()
-    results = {'success': [], 'failed': []}
-    
+
+@app.route('/api/v2/devices/<int:device_id>/ip-history', methods=['GET'])
+@require_permission('view_device')
+def api_device_ip_history(device_id):
+    with get_db_connection(current_app) as conn:
+        history = get_ip_history_from_audit_logs(device_id=device_id, conn=conn)
+    return jsonify({'items': history})
+
+
+@app.route('/api/v2/ips/<path:ip_address>/history', methods=['GET'])
+@require_permission('view_subnet')
+def api_ip_history(ip_address):
+    with get_db_connection(current_app) as conn:
+        history = get_ip_history_from_audit_logs(ip_address=ip_address, conn=conn)
+    return jsonify({'items': history, 'ip': ip_address})
+
+
+@app.route('/api/v2/subnets/<int:subnet_id>/available-ips', methods=['GET'])
+@require_permission('view_subnet')
+def api_subnet_available_ips(subnet_id):
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT id FROM Subnet WHERE id = %s', (subnet_id,))
+        if not cursor.fetchone():
+            return jsonify({'error': 'Subnet not found'}), 404
+        cursor.execute('''
+            SELECT ip.id, ip.ip FROM IPAddress ip
+            LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+            WHERE ip.subnet_id = %s AND dia.ip_id IS NULL ORDER BY INET_ATON(ip.ip)
+        ''', (subnet_id,))
+        ips = [{'id': r['id'], 'ip': r['ip']} for r in cursor.fetchall()]
+        ips = filter_ips_outside_dhcp(cursor, subnet_id, ips)
+    return items_response(ips)
+
+
+@app.route('/api/v2/subnets/<int:subnet_id>/export', methods=['GET'])
+@require_permission('export_subnet_csv')
+def api_subnet_export(subnet_id):
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
-        for name in device_names:
+        cursor.execute('SELECT name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
+        subnet = cursor.fetchone()
+        if not subnet:
+            return jsonify({'error': 'Subnet not found'}), 404
+        rows = subnet_ip_csv_rows(fetch_subnet_ip_rows(cursor, subnet_id))
+    return csv_attachment(rows, ['IP Address', 'Hostname', 'Description'], f"{subnet[0]}_{subnet[1]}.csv".replace('/', '_'))
+
+
+@app.route('/api/v2/ip-addresses/<int:ip_id>', methods=['PATCH'])
+@require_permission('edit_subnet')
+def api_patch_ip_address(ip_id):
+    data = json_body()
+    notes = data.get('notes')
+    if notes is None:
+        return jsonify({'error': 'notes field required'}), 400
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT ip, subnet_id FROM IPAddress WHERE id = %s', (ip_id,))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'error': 'IP not found'}), 404
+        cursor.execute('UPDATE IPAddress SET notes = %s WHERE id = %s', (notes.strip() or None, ip_id))
+        add_audit_log(get_current_user_id(), 'update_ip_notes', f"Updated notes for IP {row['ip']}", row['subnet_id'], conn=conn)
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/devices/<int:device_id>/custom-fields', methods=['PATCH'])
+@require_permission('edit_device')
+def api_patch_device_custom_fields(device_id):
+    data = json_body()
+    with get_db_connection(current_app) as conn:
+        errors = update_entity_custom_fields(conn, 'device', device_id, data.get('custom_fields') or data, get_current_user_id(), is_json=True)
+        if errors:
+            return jsonify({'error': '; '.join(errors)}), 400
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/subnets/<int:subnet_id>/custom-fields', methods=['PATCH'])
+@require_permission('edit_subnet')
+def api_patch_subnet_custom_fields(subnet_id):
+    data = json_body()
+    with get_db_connection(current_app) as conn:
+        errors = update_entity_custom_fields(conn, 'subnet', subnet_id, data.get('custom_fields') or data, get_current_user_id(), is_json=True)
+        if errors:
+            return jsonify({'error': '; '.join(errors)}), 400
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/custom-fields/reorder', methods=['POST'])
+@require_permission('manage_custom_fields')
+def api_reorder_custom_fields():
+    data = json_body()
+    entity_type = data.get('entity_type')
+    field_orders = data.get('field_orders') or {}
+    if entity_type not in ('device', 'subnet'):
+        return jsonify({'error': 'Invalid entity_type'}), 400
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        for field_id, order in field_orders.items():
+            cursor.execute('UPDATE CustomFieldDefinition SET display_order = %s WHERE id = %s AND entity_type = %s',
+                          (int(order), int(field_id), entity_type))
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/audit/export', methods=['GET'])
+@require_permission('view_audit')
+def api_audit_export():
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT al.timestamp, u.name, al.action, al.details, s.name
+            FROM AuditLog al
+            LEFT JOIN User u ON al.user_id = u.id
+            LEFT JOIN Subnet s ON al.subnet_id = s.id
+            ORDER BY al.timestamp DESC
+        ''')
+        rows = cursor.fetchall()
+    return csv_attachment(rows, ['Timestamp', 'User', 'Action', 'Details', 'Subnet'], 'audit_log.csv')
+
+
+@app.route('/api/v2/users', methods=['POST'])
+@require_permission('manage_users')
+def api_add_user():
+    data = json_body()
+    name = (data.get('name') or '').strip()
+    email = (data.get('email') or '').strip()
+    password = data.get('password') or ''
+    role_id = data.get('role_id')
+    if not all([name, email, password]):
+        return jsonify({'error': 'Name, email, and password required'}), 400
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        try:
+            api_key = generate_api_key()
+            cursor.execute('INSERT INTO User (name, email, password, role_id, api_key) VALUES (%s, %s, %s, %s, %s)',
+                          (name, email, hash_password(password), role_id, api_key))
+            conn.commit()
+            return jsonify({'id': cursor.lastrowid}), 201
+        except mysql.connector.IntegrityError:
+            return jsonify({'error': 'Email already exists'}), 400
+
+
+@app.route('/api/v2/users/<int:user_id>', methods=['PUT'])
+@require_permission('manage_users')
+def api_update_user(user_id):
+    data = json_body()
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        if 'name' in data:
+            cursor.execute('UPDATE User SET name = %s WHERE id = %s', (data['name'].strip(), user_id))
+        if 'email' in data:
+            cursor.execute('UPDATE User SET email = %s WHERE id = %s', (data['email'].strip(), user_id))
+        if 'password' in data and data['password']:
+            cursor.execute('UPDATE User SET password = %s WHERE id = %s', (hash_password(data['password']), user_id))
+        if 'role_id' in data:
+            cursor.execute('UPDATE User SET role_id = %s WHERE id = %s', (data['role_id'], user_id))
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/users/<int:user_id>', methods=['DELETE'])
+@require_permission('manage_users')
+def api_delete_user(user_id):
+    if user_id == get_current_user_id():
+        return jsonify({'error': 'Cannot delete your own account'}), 400
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM User WHERE id = %s', (user_id,))
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/users/<int:user_id>/regenerate-api-key', methods=['POST'])
+@require_permission('manage_users')
+def api_regenerate_user_api_key(user_id):
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        new_key = generate_api_key()
+        cursor.execute('UPDATE User SET api_key = %s WHERE id = %s', (new_key, user_id))
+        conn.commit()
+    return jsonify({'api_key': new_key})
+
+
+@app.route('/api/v2/roles', methods=['POST'])
+@require_permission('manage_roles')
+def api_add_role():
+    data = json_body()
+    name = (data.get('name') or '').strip()
+    description = (data.get('description') or '').strip()
+    permission_ids = data.get('permission_ids') or []
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute('INSERT INTO Role (name, description) VALUES (%s, %s)', (name, description))
+            role_id = cursor.lastrowid
+            for pid in permission_ids:
+                cursor.execute('INSERT INTO RolePermission (role_id, permission_id) VALUES (%s, %s)', (role_id, pid))
+            conn.commit()
+            return jsonify({'id': role_id}), 201
+        except mysql.connector.IntegrityError:
+            return jsonify({'error': 'Role already exists'}), 400
+
+
+@app.route('/api/v2/roles/<int:role_id>', methods=['PUT'])
+@require_permission('manage_roles')
+def api_update_role(role_id):
+    data = json_body()
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        if 'name' in data:
+            cursor.execute('UPDATE Role SET name = %s WHERE id = %s', (data['name'].strip(), role_id))
+        if 'description' in data:
+            cursor.execute('UPDATE Role SET description = %s WHERE id = %s', (data['description'], role_id))
+        if 'require_2fa' in data:
+            cursor.execute('UPDATE Role SET require_2fa = %s WHERE id = %s', (bool(data['require_2fa']), role_id))
+        if 'permission_ids' in data:
+            cursor.execute('DELETE FROM RolePermission WHERE role_id = %s', (role_id,))
+            for pid in data['permission_ids']:
+                cursor.execute('INSERT INTO RolePermission (role_id, permission_id) VALUES (%s, %s)', (role_id, pid))
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/roles/<int:role_id>', methods=['DELETE'])
+@require_permission('manage_roles')
+def api_delete_role(role_id):
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM User WHERE role_id = %s', (role_id,))
+        if cursor.fetchone()[0] > 0:
+            return jsonify({'error': 'Role is assigned to users'}), 400
+        cursor.execute('DELETE FROM RolePermission WHERE role_id = %s', (role_id,))
+        cursor.execute('DELETE FROM Role WHERE id = %s', (role_id,))
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/v2/permissions', methods=['GET'])
+@require_permission('manage_roles')
+def api_permissions():
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT id, name, description, category FROM Permission ORDER BY category, name')
+        return items_response(cursor.fetchall())
+
+
+@app.route('/api/v2/bulk/assign-ips', methods=['POST'])
+@require_permission('add_device_ip')
+def api_bulk_assign_ips():
+    data = json_body()
+    device_id = data.get('device_id')
+    ip_ids = data.get('ip_ids') or []
+    results = {'success': [], 'failed': []}
+    with get_db_connection(current_app) as conn:
+        for ip_id in ip_ids:
+            try:
+                ip = assign_ip_to_device(conn, device_id, ip_id, get_current_user_id())
+                results['success'].append({'ip_id': ip_id, 'ip': ip})
+            except Exception as e:
+                results['failed'].append({'ip_id': ip_id, 'reason': str(e)})
+        conn.commit()
+    return jsonify(results)
+
+
+@app.route('/api/v2/bulk/create-devices', methods=['POST'])
+@require_permission('add_device')
+def api_bulk_create_devices():
+    data = json_body()
+    names = data.get('names') or []
+    results = {'success': [], 'failed': []}
+    user_id = get_current_user_id()
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        for name in names:
             name = name.strip()
             if not name:
                 continue
             try:
-                cursor.execute('INSERT INTO Device (name, device_type_id) VALUES (%s, %s)', (name, device_type_id))
+                cursor.execute('INSERT INTO Device (name) VALUES (%s)', (name,))
                 device_id = cursor.lastrowid
-                add_audit_log(session['user_id'], 'add_device', f"Added device {name}", conn=conn)
-                results['success'].append({'name': name, 'id': device_id})
+                add_audit_log(user_id, 'add_device', f"Added device {name}", conn=conn)
+                results['success'].append({'id': device_id, 'name': name})
             except Exception as e:
                 results['failed'].append({'name': name, 'reason': str(e)})
         conn.commit()
-    logging.info(f"User {user_name} bulk created {len(results['success'])} devices.")
     return jsonify(results)
 
-@app.route('/bulk/assign_tags', methods=['POST'])
-@permission_required('assign_device_tag')
-def bulk_assign_tags():
-    device_ids = request.form.getlist('device_ids[]')
-    tag_ids = request.form.getlist('tag_ids[]')
-    user_name = get_current_user_name()
+
+@app.route('/api/v2/bulk/assign-tags', methods=['POST'])
+@require_permission('assign_device_tag')
+def api_bulk_assign_tags():
+    data = json_body()
+    device_ids = data.get('device_ids') or []
+    tag_id = data.get('tag_id')
     results = {'success': [], 'failed': []}
-    
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
         for device_id in device_ids:
-            cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
-            device = cursor.fetchone()
-            if not device:
-                results['failed'].append({'device_id': device_id, 'reason': 'Device not found'})
-                continue
-            device_name = device[0]
-            
-            for tag_id in tag_ids:
-                try:
-                    cursor.execute('SELECT name FROM Tag WHERE id = %s', (tag_id,))
-                    tag = cursor.fetchone()
-                    if not tag:
-                        continue
-                    tag_name = tag[0]
-                    
-                    cursor.execute('SELECT id FROM DeviceTag WHERE device_id = %s AND tag_id = %s', (device_id, tag_id))
-                    if cursor.fetchone():
-                        continue  # Already assigned
-                    
-                    cursor.execute('INSERT INTO DeviceTag (device_id, tag_id) VALUES (%s, %s)', (device_id, tag_id))
-                    add_audit_log(session['user_id'], 'assign_device_tag', 
-                                f"Assigned tag '{tag_name}' to device '{device_name}'", conn=conn)
-                    results['success'].append({'device_id': device_id, 'device_name': device_name, 'tag_id': tag_id, 'tag_name': tag_name})
-                except Exception as e:
-                    results['failed'].append({'device_id': device_id, 'tag_id': tag_id, 'reason': str(e)})
+            try:
+                assign_tag_to_device(conn, device_id, tag_id, get_current_user_id())
+                results['success'].append({'device_id': device_id})
+            except Exception as e:
+                results['failed'].append({'device_id': device_id, 'reason': str(e)})
         conn.commit()
-    
-    logging.info(f"User {user_name} bulk assigned tags to {len(device_ids)} devices.")
     return jsonify(results)
 
-@app.route('/bulk/export_subnets', methods=['POST'])
-@permission_required('export_subnet_csv')
-def bulk_export_subnets():
-    subnet_ids = request.form.getlist('subnet_ids[]')
+
+@app.route('/api/v2/bulk/export-subnets', methods=['POST'])
+@require_permission('export_subnet_csv')
+def api_bulk_export_subnets():
+    data = json_body()
+    subnet_ids = data.get('subnet_ids') or []
     output = StringIO()
     writer = csv.writer(output)
-    
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         for subnet_id in subnet_ids:
-            cursor.execute('SELECT id, name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
+            cursor.execute('SELECT name, cidr FROM Subnet WHERE id = %s', (subnet_id,))
             subnet = cursor.fetchone()
             if not subnet:
                 continue
-            writer.writerow([f"Subnet: {subnet[1]} ({subnet[2]})"])
+            writer.writerow([f"Subnet: {subnet[0]} ({subnet[1]})"])
             writer.writerow(['IP Address', 'Hostname', 'Description'])
             writer.writerows(subnet_ip_csv_rows(fetch_subnet_ip_rows(cursor, subnet_id)))
             writer.writerow([])
-    
     output.seek(0)
-    return send_file(
-        BytesIO(output.getvalue().encode('utf-8')),
-        mimetype='text/csv',
-        as_attachment=True,
-        download_name='bulk_subnet_export.csv',
-    )
+    return send_file(BytesIO(output.getvalue().encode('utf-8')), mimetype='text/csv',
+                     as_attachment=True, download_name='bulk_subnet_export.csv')
 
-# API key regeneration route
-@app.route('/regenerate_api_key', methods=['POST'])
-@permission_required('manage_users')
-def regenerate_api_key():
-    user_id = request.form['user_id']
-    from flask import current_app
+
+@app.route('/api/v2/racks/<int:rack_id>/export', methods=['GET'])
+@require_permission('export_rack_csv')
+def api_rack_export(rack_id):
     with get_db_connection(current_app) as conn:
-        cursor = conn.cursor()
-        new_api_key = generate_api_key()
-        cursor.execute('UPDATE User SET api_key = %s WHERE id = %s', (new_api_key, user_id))
-        conn.commit()
-    return redirect(url_for('users'))
+        ctx = load_rack_view(conn, rack_id, side='front', networked_only=False)
+        if not ctx:
+            return jsonify({'error': 'Rack not found'}), 404
+        rack = ctx['rack']
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow([f"Rack: {rack['name']} ({rack['site']})"])
+        writer.writerow(['U', 'Side', 'Device'])
+        for rd in sorted(ctx['rack_devices'], key=lambda x: (-x['position_u'], x['side'])):
+            writer.writerow([rd['position_u'], rd['side'], rd.get('device_name') or rd.get('nonnet_device_name') or ''])
+    output.seek(0)
+    return send_file(BytesIO(output.getvalue().encode('utf-8')), mimetype='text/csv',
+                     as_attachment=True, download_name=f"{rack['name']}_rack.csv".replace(' ', '_'))
+
+
+# ── SPA static files ──────────────────────────────────────────────────────────
+STATIC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+DIST = os.path.join(STATIC_ROOT, 'dist')
+
+
+@app.route('/favicon.ico')
+def favicon():
+    logo = app.config['LOGO_PNG']
+    if logo.startswith(('http://', 'https://')):
+        return redirect(logo)
+    path = logo if os.path.isabs(logo) else os.path.join(os.path.dirname(os.path.abspath(__file__)), logo)
+    if os.path.isfile(path):
+        return send_file(path, mimetype='image/png')
+    abort(404)
+
+
+@app.route('/assets/<path:sub>')
+def spa_assets(sub):
+    return send_from_directory(os.path.join(DIST, 'assets'), sub)
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def spa(path):
+    if path.startswith('api/'):
+        abort(404)
+    index = os.path.join(DIST, 'index.html')
+    if not os.path.isfile(index):
+        return ('Frontend not built. Run: cd frontend && npm ci && npm run build', 503)
+    if path:
+        try:
+            file_path = safe_join(DIST, path)
+        except ValueError:
+            file_path = None
+        if file_path and os.path.isfile(file_path):
+            return send_file(file_path)
+    return send_from_directory(DIST, 'index.html')
+
 
 # ── App startup ───────────────────────────────────────────────────────────────
-@app.context_processor
-def inject_env_vars():
-    version = os.environ.get('VERSION', 'unknown')
-    return {
-        'NAME': os.environ.get('NAME', 'JDB-NET'),
-        'LOGO_PNG': os.environ.get('LOGO_PNG', 'https://assets.jdbnet.co.uk/logo/128x128.png'),
-        'VERSION': version,
-        'has_permission': has_permission,
-    }
-
 init_db(app)
 
 if __name__ == '__main__':

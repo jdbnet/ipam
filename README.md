@@ -19,10 +19,22 @@ A Flask-based web application for comprehensive IP Address Management (IPAM). Ma
 - **Audit Logging**: Complete audit trail of all changes with user, action, details, and timestamps
 - **User Management**: Multi-user support with secure password authentication
 - **Role-Based Access Control (RBAC)**: Granular permission system with default roles (admin, user, view_only) and custom role creation
-- **REST API**: Full-featured REST API with API key authentication for programmatic access
-- **CSV Export**: Export subnet and rack data to CSV files
-- **Device Statistics**: View device counts by type
-- **Web Interface**: Modern, responsive web GUI built with Tailwind CSS and dark mode support
+- **Web Interface**: Vue 3 SPA with automatic light/dark theme and mobile-first layout
+- **REST API v2**: JSON API at `/api/v2` (session cookies for browser, API keys for automation)
+
+## Local development
+
+```bash
+# Backend
+pip install -r requirements.txt
+./run.sh   # builds frontend if needed, starts Flask on :5000
+
+# Frontend hot reload (optional)
+cd frontend && npm install && npm run dev
+# Vite proxies /api to http://127.0.0.1:5000
+```
+
+API reference: [API.md](API.md)
 
 ## Quick Start with Docker
 
@@ -112,7 +124,7 @@ See [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md) for removed fea
 
 1. Navigate to "Devices" from the main menu
 2. Click "Add Device"
-3. Enter device name and select device type
+3. Enter device name (and optional description)
 4. Click "Create Device"
 
 ### Assigning IP Addresses to Devices
@@ -206,7 +218,6 @@ The application includes a comprehensive REST API for programmatic access:
    - **Tag Assignment**: `GET`, `POST /api/v1/devices/{id}/tags`, `DELETE /api/v1/devices/{id}/tags/{tag_id}`
    - **Subnets**: `GET`, `POST`, `PUT`, `DELETE /api/v1/subnets`
    - **Racks**: `GET`, `POST`, `DELETE /api/v1/racks`
-   - **Device Types**: `GET /api/v1/device-types`
    - **DHCP**: `GET`, `POST /api/v1/subnets/{id}/dhcp`
    - **Audit Log**: `GET /api/v1/audit`
    - **Users & Roles**: `GET /api/v1/users`, `GET /api/v1/roles` (admin only)
