@@ -1796,21 +1796,6 @@ def update_feature_flags():
     
     return redirect(url_for('admin'))
 
-@app.route('/api-docs')
-@permission_required('view_admin')
-def api_docs():
-    # Get current user's API key
-    from flask import current_app
-    api_key = None
-    if 'user_id' in session:
-        with get_db_connection(current_app) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT api_key FROM User WHERE id = %s', (session['user_id'],))
-            result = cursor.fetchone()
-            if result:
-                api_key = result[0]
-    return render_with_user('api_docs.html', api_key=api_key)
-
 @app.route('/account', methods=['GET'])
 @login_required
 def account_settings():
