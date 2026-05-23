@@ -31,6 +31,7 @@ jobs:
         run: |
           VERSION=${{ steps.get_version.outputs.VERSION }}
           docker build -t cr.jdbnet.co.uk/public/ipam:$VERSION \
+                       -t cr.jdbnet.co.uk/public/ipam:v2 \
                        -t cr.jdbnet.co.uk/public/ipam:latest \
                        --build-arg VERSION=$VERSION \
                        .

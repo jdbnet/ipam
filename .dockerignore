@@ -1,11 +1,10 @@
+# Frontend dev
+frontend/node_modules/
+
 # Documentation
-README.md
-CHANGELOG.md
 *.md
 
 # Deployment files
-deployment-dev.yml
-deployment-prod.yml
 run.sh
 Dockerfile
 .dockerignore
@@ -14,6 +13,7 @@ Dockerfile
 .git
 .gitignore
 .gitattributes
+.gitea
 
 # Python cache
 __pycache__/
@@ -44,15 +44,6 @@ ENV/
 *.log
 logs/
 
-# Build tools
-tailwindcss
-
 # OS files
 .DS_Store
 Thumbs.db
-
-# Minified files
-**/*.js
-!**/*.min.js
-device_types.css
-devices.css

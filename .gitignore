@@ -1,5 +1,4 @@
 __pycache__
-tailwindcss
-static/css/output.css
 .env
-backups/
+frontend/node_modules/
+static/dist/

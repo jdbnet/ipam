@@ -2,7 +2,5 @@ Flask
 mysql-connector-python
 dotenv
 gunicorn
-requests
 pyotp
 qrcode[pil]
-Flask-Limiter

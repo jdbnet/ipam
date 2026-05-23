@@ -1,7 +1,8 @@
 #!/bin/bash
-
-echo "Generating CSS..."
-./tailwindcss -i ./static/css/input.css -o ./static/css/output.css --content "./templates/*.html,./static/js/*.min.js" --minify
-
+set -e
+if [ ! -f static/dist/index.html ]; then
+  echo "Building frontend..."
+  (cd frontend && npm ci && npm run build)
+fi
 echo "Starting app..."
 python app.py

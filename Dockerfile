@@ -1,15 +1,18 @@
-FROM python:3.13-slim
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /app
+COPY frontend/package.json ./frontend/
+RUN cd frontend && npm install
+COPY frontend/ ./frontend/
+RUN cd frontend && npm run build
+
+FROM python:3.14-slim
 LABEL org.opencontainers.image.vendor="JDB-NET"
 WORKDIR /app
-COPY . /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py db.py ./
+COPY --from=frontend /app/static/dist ./static/dist
 ARG VERSION=unknown
 ENV VERSION=${VERSION}
-RUN pip install -r requirements.txt
-RUN apt-get update && apt-get install -y curl mariadb-client-compat
-RUN rm -rf /var/lib/apt/lists/*
-RUN curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64 \
-    && chmod +x tailwindcss-linux-x64 \
-    && ./tailwindcss-linux-x64 -i ./static/css/input.css -o ./static/css/output.css --content "./templates/*.html,./static/js/*.min.js" --minify \
-    && rm tailwindcss-linux-x64
 EXPOSE 5000
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app", "--log-level", "warning"]

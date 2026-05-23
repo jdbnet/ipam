@@ -6,6 +6,7 @@ import mysql.connector
 import logging
 from flask import current_app
 
+# ── Connection, crypto, schema init ─────────────────────────────────────────
 def hash_password(password, salt=None):
     if salt is None:
         salt = base64.b64encode(os.urandom(16)).decode('utf-8')
@@ -79,19 +80,10 @@ def init_db(app=None):
     )
     ''')
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS DeviceType (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(255) NOT NULL UNIQUE,
-        icon_class VARCHAR(255) NOT NULL
-    )
-    ''')
-    cursor.execute('''
     CREATE TABLE IF NOT EXISTS Device (
         id INTEGER PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(255) NOT NULL,
-        description TEXT,
-        device_type_id INTEGER DEFAULT 1,
-        FOREIGN KEY (device_type_id) REFERENCES DeviceType(id)
+        description TEXT
     )
     ''')
     cursor.execute('''
@@ -133,37 +125,6 @@ def init_db(app=None):
         FOREIGN KEY (device_id) REFERENCES Device(id) ON DELETE CASCADE
     )
     ''')
-    # Initialize default device types only if table is empty
-    cursor.execute('SELECT COUNT(*) FROM DeviceType')
-    if cursor.fetchone()[0] == 0:
-        cursor.executemany('INSERT INTO DeviceType (name, icon_class) VALUES (%s, %s)', [
-            ('Server', 'fa-server'),
-            ('Virtual Machine', 'fa-boxes-stacked'),
-            ('Switch', 'fa-network-wired'),
-            ('Firewall', 'fa-shield-halved'),
-            ('WiFi AP', 'fa-wifi'),
-            ('Printer', 'fa-print'),
-            ('Other', 'fa-question')
-        ])
-        conn.commit()  # Commit the inserts before querying
-    
-    # Add device_type_id column if it doesn't exist
-    cursor.execute("SHOW COLUMNS FROM Device LIKE 'device_type_id'")
-    if not cursor.fetchone():
-        cursor.execute('ALTER TABLE Device ADD COLUMN device_type_id INTEGER DEFAULT NULL')
-    
-    # Set default device_type_id for devices that don't have one
-    # Use the first available device type, or leave NULL if no types exist
-    cursor.execute('SELECT id FROM DeviceType ORDER BY id LIMIT 1')
-    first_type_result = cursor.fetchone()
-    if first_type_result:
-        first_type_id = first_type_result[0]
-        cursor.execute('UPDATE Device SET device_type_id = %s WHERE device_type_id IS NULL', (first_type_id,))
-    try:
-        cursor.execute('ALTER TABLE Device ADD CONSTRAINT fk_device_type FOREIGN KEY (device_type_id) REFERENCES DeviceType(id)')
-    except mysql.connector.Error as e:
-        if e.errno != 1061 and e.errno != 1826 and 'Duplicate' not in str(e):
-            raise
     # Create Role table
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS Role (
@@ -312,7 +273,6 @@ def init_db(app=None):
         help_text TEXT,
         display_order INTEGER DEFAULT 0,
         validation_rules TEXT,
-        searchable BOOLEAN DEFAULT FALSE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )
@@ -350,32 +310,6 @@ def init_db(app=None):
     if not cursor.fetchone():
         cursor.execute('ALTER TABLE Subnet ADD COLUMN vlan_notes TEXT DEFAULT NULL')
     
-    # Create FeatureFlags table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS FeatureFlags (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        feature_key VARCHAR(255) NOT NULL UNIQUE,
-        enabled BOOLEAN DEFAULT TRUE,
-        description TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Initialize default feature flags
-    default_features = [
-        ('racks', True, 'Enable rack management functionality'),
-        ('ip_address_notes', True, 'Enable IP address notes/descriptions editing on subnet page'),
-        ('device_tags', True, 'Enable device tagging functionality'),
-        ('bulk_operations', True, 'Enable bulk operations for devices and IPs')
-    ]
-    
-    for feature_key, enabled, description in default_features:
-        cursor.execute('SELECT id FROM FeatureFlags WHERE feature_key = %s', (feature_key,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO FeatureFlags (feature_key, enabled, description) VALUES (%s, %s, %s)',
-                          (feature_key, enabled, description))
-    
     # Define all permissions with categories
     permissions = [
         # View permissions
@@ -388,15 +322,11 @@ def init_db(app=None):
         ('view_audit', 'View Audit Log', 'View'),
         ('view_admin', 'View Admin panel', 'View'),
         ('view_users', 'View Users page', 'View'),
-        ('view_device_types', 'View Device Types page', 'View'),
-        ('view_device_type_stats', 'View Device Type Statistics', 'View'),
-        ('view_devices_by_type', 'View Devices by Type', 'View'),
         ('view_dhcp', 'View DHCP configuration', 'View'),
-        ('view_help', 'View Help page', 'View'),
         
         # Device permissions
         ('add_device', 'Add new device', 'Device'),
-        ('edit_device', 'Edit device (rename, description, type)', 'Device'),
+        ('edit_device', 'Edit device (rename, description)', 'Device'),
         ('delete_device', 'Delete device', 'Device'),
         ('add_device_ip', 'Add IP address to device', 'Device'),
         ('remove_device_ip', 'Remove IP address from device', 'Device'),
@@ -417,11 +347,6 @@ def init_db(app=None):
         
         # DHCP permissions
         ('configure_dhcp', 'Configure DHCP pools', 'DHCP'),
-        
-        # Device Type permissions
-        ('add_device_type', 'Add device type', 'Device Type'),
-        ('edit_device_type', 'Edit device type', 'Device Type'),
-        ('delete_device_type', 'Delete device type', 'Device Type'),
         
         # Tag permissions
         ('view_tags', 'View tags', 'Tag'),
@@ -488,14 +413,13 @@ def init_db(app=None):
     # Assign non-admin permissions to user role
     non_admin_permissions = [
         'view_index', 'view_devices', 'view_device', 'view_subnet', 'view_racks', 'view_rack',
-        'view_audit', 'view_device_types', 'view_device_type_stats', 'view_devices_by_type',
-        'view_dhcp', 'view_help',
+        'view_audit',
+        'view_dhcp',
         'add_device', 'edit_device', 'delete_device', 'add_device_ip', 'remove_device_ip',
         'add_subnet', 'edit_subnet', 'delete_subnet', 'export_subnet_csv',
         'add_rack', 'delete_rack', 'add_device_to_rack', 'remove_device_from_rack',
         'add_nonnet_device_to_rack', 'export_rack_csv',
         'configure_dhcp',
-        'add_device_type', 'edit_device_type', 'delete_device_type',
         'view_tags', 'add_tag', 'edit_tag', 'delete_tag', 'assign_device_tag', 'remove_device_tag',
         'view_custom_fields', 'manage_custom_fields'
     ]
@@ -515,8 +439,8 @@ def init_db(app=None):
     # Same view permissions as user role, but excluding admin views (view_admin, view_users)
     view_only_permissions = [
         'view_index', 'view_devices', 'view_device', 'view_subnet', 'view_racks', 'view_rack',
-        'view_audit', 'view_device_types', 'view_device_type_stats', 'view_devices_by_type',
-        'view_dhcp', 'view_help', 'view_tags', 'view_custom_fields'
+        'view_audit',
+        'view_dhcp', 'view_tags', 'view_custom_fields'
     ]
     
     for perm_name in view_only_permissions:
@@ -605,7 +529,6 @@ def init_db(app=None):
     create_index_if_not_exists(cursor, 'idx_rackdevice_rack_side', 'RackDevice', 'rack_id, side')
     
     # Device table indexes
-    create_index_if_not_exists(cursor, 'idx_device_device_type_id', 'Device', 'device_type_id')
     
     # User table indexes (api_key already has UNIQUE index)
     create_index_if_not_exists(cursor, 'idx_user_role_id', 'User', 'role_id')
@@ -616,5 +539,60 @@ def init_db(app=None):
     create_index_if_not_exists(cursor, 'idx_customfield_entity_order', 'CustomFieldDefinition', 'entity_type, display_order')
     
     logging.info("Database indexes created successfully")
+
+    run_v2_migrations(cursor, conn)
+
     conn.commit()
     conn.close()
+
+
+def run_v2_migrations(cursor, conn):
+    """One-time schema cleanup for v2 upgrades from v1.x."""
+    logging.info("Running v2 database migrations...")
+
+    cursor.execute('DROP TABLE IF EXISTS FeatureFlags')
+
+    cursor.execute("SHOW COLUMNS FROM CustomFieldDefinition LIKE 'searchable'")
+    if cursor.fetchone():
+        cursor.execute('ALTER TABLE CustomFieldDefinition DROP COLUMN searchable')
+        logging.info("Dropped CustomFieldDefinition.searchable column")
+
+    for perm_name in ('view_help',):
+        cursor.execute('SELECT id FROM Permission WHERE name = %s', (perm_name,))
+        row = cursor.fetchone()
+        if row:
+            perm_id = row[0]
+            cursor.execute('DELETE FROM RolePermission WHERE permission_id = %s', (perm_id,))
+            cursor.execute('DELETE FROM Permission WHERE id = %s', (perm_id,))
+            logging.info("Removed orphaned permission: %s", perm_name)
+
+    cursor.execute("SHOW COLUMNS FROM Device LIKE 'device_type_id'")
+    if cursor.fetchone():
+        cursor.execute("""
+            SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Device'
+            AND COLUMN_NAME = 'device_type_id' AND REFERENCED_TABLE_NAME IS NOT NULL
+        """)
+        for (fk_name,) in cursor.fetchall():
+            cursor.execute(f'ALTER TABLE Device DROP FOREIGN KEY `{fk_name}`')
+        cursor.execute('ALTER TABLE Device DROP COLUMN device_type_id')
+        logging.info("Dropped Device.device_type_id column")
+
+    cursor.execute("SHOW TABLES LIKE 'DeviceType'")
+    if cursor.fetchone():
+        cursor.execute('DROP TABLE DeviceType')
+        logging.info("Dropped DeviceType table")
+
+    for perm_name in (
+        'view_device_types', 'view_device_type_stats', 'view_devices_by_type',
+        'add_device_type', 'edit_device_type', 'delete_device_type',
+    ):
+        cursor.execute('SELECT id FROM Permission WHERE name = %s', (perm_name,))
+        row = cursor.fetchone()
+        if row:
+            perm_id = row[0]
+            cursor.execute('DELETE FROM RolePermission WHERE permission_id = %s', (perm_id,))
+            cursor.execute('DELETE FROM Permission WHERE id = %s', (perm_id,))
+            logging.info("Removed orphaned permission: %s", perm_name)
+
+    logging.info("v2 database migrations complete")
