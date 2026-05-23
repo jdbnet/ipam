@@ -110,37 +110,62 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def load_permissions_for_user(user_id, conn):
+    """Return the set of permission names granted to a user via their role."""
+    cursor = conn.cursor()
+    cursor.execute('SELECT role_id FROM User WHERE id = %s', (user_id,))
+    role_result = cursor.fetchone()
+    if not role_result or not role_result[0]:
+        return set()
+    cursor.execute('''
+        SELECT p.name FROM RolePermission rp
+        JOIN Permission p ON rp.permission_id = p.id
+        WHERE rp.role_id = %s
+    ''', (role_result[0],))
+    return {row[0] for row in cursor.fetchall()}
+
+
+def establish_user_session(user_id, conn=None):
+    """Populate session after successful authentication."""
+    close_conn = False
+    if conn is None:
+        conn = get_db_connection(current_app)
+        close_conn = True
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT name FROM User WHERE id = %s', (user_id,))
+        row = cursor.fetchone()
+        session['user_name'] = row[0] if row else ''
+        session['permissions'] = list(load_permissions_for_user(user_id, conn))
+        session['logged_in'] = True
+        session['user_id'] = user_id
+        session.modified = True
+    finally:
+        if close_conn:
+            conn.close()
+
+
 def has_permission(permission_name, user_id=None, conn=None):
-    """Check if a user has a specific permission"""
+    """Check if a user has a specific permission."""
     if user_id is None:
         user_id = session.get('user_id')
     if not user_id:
         return False
-    
+
+    if user_id == session.get('user_id') and 'permissions' in session:
+        return permission_name in session['permissions']
+
+    api_user = getattr(request, 'api_user', None)
+    if api_user and api_user.get('id') == user_id and 'permissions' in api_user:
+        return permission_name in api_user['permissions']
+
     close_conn = False
     if conn is None:
-        from flask import current_app
         conn = get_db_connection(current_app)
         close_conn = True
-    
+
     try:
-        cursor = conn.cursor()
-        # Get user's role
-        cursor.execute('SELECT role_id FROM User WHERE id = %s', (user_id,))
-        role_result = cursor.fetchone()
-        if not role_result or not role_result[0]:
-            return False
-        
-        role_id = role_result[0]
-        
-        # Check if role has the permission
-        cursor.execute('''
-            SELECT COUNT(*) FROM RolePermission rp
-            JOIN Permission p ON rp.permission_id = p.id
-            WHERE rp.role_id = %s AND p.name = %s
-        ''', (role_id, permission_name))
-        result = cursor.fetchone()
-        return result[0] > 0 if result else False
+        return permission_name in load_permissions_for_user(user_id, conn)
     finally:
         if close_conn:
             conn.close()
@@ -166,12 +191,14 @@ def get_user_from_api_key(api_key):
         cursor.execute('SELECT id, name, email, role_id FROM User WHERE api_key = %s', (api_key,))
         result = cursor.fetchone()
         if result:
-            return {
+            user = {
                 'id': result[0],
                 'name': result[1],
                 'email': result[2],
-                'role_id': result[3]
+                'role_id': result[3],
             }
+            user['permissions'] = load_permissions_for_user(user['id'], conn)
+            return user
     return None
 
 def api_auth_required(f):
@@ -204,34 +231,25 @@ def api_auth_required(f):
         # Execute the function
         response = f(*args, **kwargs)
         
-        # Log API usage to audit log
-        try:
-            api_path = request.path
-            http_method = request.method
-            user_name = user.get('name', 'Unknown')
-            
-            # Get response status code if available
-            status_code = None
-            if hasattr(response, 'status_code'):
-                status_code = response.status_code
-            elif isinstance(response, tuple) and len(response) > 1:
-                status_code = response[1]
-            
-            # Build details string with status if available
-            if status_code:
-                details = f"API call: {http_method} {api_path} (Status: {status_code})"
-            else:
-                details = f"API call: {http_method} {api_path}"
-            
-            add_audit_log(
-                user_id=user['id'],
-                action='api_usage',
-                details=details,
-                subnet_id=None
-            )
-        except Exception as e:
-            # Don't fail the request if logging fails
-            logging.error(f"Failed to log API usage: {e}")
+        # Log mutating API calls only (GET traffic was dominating audit volume)
+        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            try:
+                status_code = None
+                if hasattr(response, 'status_code'):
+                    status_code = response.status_code
+                elif isinstance(response, tuple) and len(response) > 1:
+                    status_code = response[1]
+                details = f"API call: {request.method} {request.path}"
+                if status_code:
+                    details += f" (Status: {status_code})"
+                add_audit_log(
+                    user_id=user['id'],
+                    action='api_usage',
+                    details=details,
+                    subnet_id=None,
+                )
+            except Exception as e:
+                logging.error(f"Failed to log API usage: {e}")
         
         return response
     return decorated_function
@@ -279,8 +297,7 @@ def get_ip_history_from_audit_logs(device_id=None, ip_address=None, conn=None):
     
     try:
         cursor = conn.cursor(dictionary=True)
-        
-        # Get device name if filtering by device_id
+
         device_name = None
         if device_id:
             cursor.execute('SELECT name FROM Device WHERE id = %s', (device_id,))
@@ -288,12 +305,10 @@ def get_ip_history_from_audit_logs(device_id=None, ip_address=None, conn=None):
             if device_result:
                 device_name = device_result['name']
             else:
-                # Device doesn't exist, return empty history
                 return []
-        
-        # Build query to get relevant audit log entries
+
         query = '''
-            SELECT al.id, al.action, al.details, al.timestamp, 
+            SELECT al.id, al.action, al.details, al.timestamp,
                    COALESCE(u.name, 'Deleted User') as user_name,
                    s.name as subnet_name, s.cidr as subnet_cidr
             FROM AuditLog al
@@ -302,10 +317,14 @@ def get_ip_history_from_audit_logs(device_id=None, ip_address=None, conn=None):
             WHERE (al.action = 'device_add_ip' OR al.action = 'device_delete_ip')
         '''
         params = []
-        
+
         if ip_address:
             query += ' AND al.details LIKE %s'
             params.append(f'%IP {ip_address}%')
+
+        if device_id and device_name:
+            query += ' AND al.details LIKE %s'
+            params.append(f'%device {device_name}%')
         
         query += ' ORDER BY al.timestamp DESC'
         
@@ -579,7 +598,7 @@ def get_custom_fields_for_entity(entity_type, entity_id, conn=None):
 # ── Data helpers (queries & business logic) ───────────────────────────────────
 
 def get_subnet_utilization(cursor, subnet_id, include_available=False):
-    """Return utilization stats for a subnet."""
+    """Return utilization stats for a single subnet."""
     cursor.execute('SELECT COUNT(*) FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
     total_ips = cursor.fetchone()[0]
 
@@ -609,6 +628,31 @@ def get_subnet_utilization(cursor, subnet_id, include_available=False):
     if include_available:
         stats['available'] = total_ips - assigned_ips - dhcp_ips
     return stats
+
+
+def get_all_subnet_utilizations(cursor):
+    """Return utilization stats keyed by subnet_id."""
+    cursor.execute('''
+        SELECT ip.subnet_id,
+               COUNT(*) AS total,
+               SUM(CASE WHEN dia.ip_id IS NOT NULL THEN 1 ELSE 0 END) AS assigned,
+               SUM(CASE WHEN dia.ip_id IS NULL AND ip.hostname = 'DHCP' THEN 1 ELSE 0 END) AS dhcp
+        FROM IPAddress ip
+        LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+        GROUP BY ip.subnet_id
+    ''')
+    result = {}
+    for subnet_id, total, assigned, dhcp in cursor.fetchall():
+        used = int(assigned) + int(dhcp)
+        total = int(total)
+        result[subnet_id] = {
+            'total': total,
+            'assigned': int(assigned),
+            'dhcp': int(dhcp),
+            'used': used,
+            'percent': round((used / total * 100) if total > 0 else 0, 1),
+        }
+    return result
 
 
 def get_dhcp_pool(cursor, subnet_id):
@@ -981,11 +1025,9 @@ def process_2fa_setup_request(request, user_id, template_name, complete_login=Fa
             ''', (secret, backup_codes_json, user_id))
         session.pop('temp_totp_secret', None)
         if complete_login:
-            session['logged_in'] = True
-            session['user_id'] = user_id
+            establish_user_session(user_id)
             session.pop('pending_user_id', None)
             session.pop('pending_email', None)
-            session.modified = True
         logging.info(f"User {user_id} enabled 2FA successfully.")
         return render_with_user(template_name, backup_codes=format_backup_codes(backup_codes), step='backup_codes')
     return render_with_user(template_name, step='generate')
@@ -1103,15 +1145,18 @@ def group_devices_by_site(devices):
 
 # ── Template & context helpers ───────────────────────────────────────────────
 def get_current_user_name():
+    if session.get('user_name'):
+        return session['user_name']
     user_id = session.get('user_id')
     if not user_id:
         return ''
-    from flask import current_app
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT name FROM User WHERE id = %s', (user_id,))
         row = cursor.fetchone()
-        return row[0] if row else ''
+        name = row[0] if row else ''
+        session['user_name'] = name
+        return name
 
 def render_with_user(*args, **kwargs):
     if 'current_user_name' not in kwargs:
@@ -1163,9 +1208,8 @@ def login():
                 return redirect(url_for('verify_2fa'))
             
             # Normal login - no 2FA required
-            session['logged_in'] = True
-            session['user_id'] = user_id
-            session.modified = True  # Ensure session is saved
+            with get_db_connection(current_app) as conn:
+                establish_user_session(user_id, conn=conn)
             logging.info(f"User {email} logged in successfully.")
             return redirect(url_for('index'))
         else:
@@ -1232,11 +1276,9 @@ def verify_2fa():
                     cursor.execute('UPDATE User SET backup_codes = %s WHERE id = %s', 
                                  (updated_codes, pending_user_id))
                     conn.commit()
-                    session['logged_in'] = True
-                    session['user_id'] = pending_user_id
+                    establish_user_session(pending_user_id, conn=conn)
                     session.pop('pending_user_id', None)
                     session.pop('pending_email', None)
-                    session.modified = True  # Ensure session is saved
                     logging.info(f"User {pending_user_id} logged in with backup code.")
                     return redirect(url_for('index'))
                 else:
@@ -1247,11 +1289,9 @@ def verify_2fa():
                     return render_with_user('verify_2fa.html', error='Invalid code format. Please enter a 6-digit code.')
                 
                 if verify_totp(totp_secret, code):
-                    session['logged_in'] = True
-                    session['user_id'] = pending_user_id
+                    establish_user_session(pending_user_id, conn=conn)
                     session.pop('pending_user_id', None)
                     session.pop('pending_email', None)
-                    session.modified = True  # Ensure session is saved
                     logging.info(f"User {pending_user_id} logged in with 2FA.")
                     return redirect(url_for('index'))
                 else:
@@ -1268,15 +1308,15 @@ def index():
         cursor = conn.cursor()
         cursor.execute('SELECT id, name, cidr, site, vlan_id FROM Subnet')
         subnets = cursor.fetchall()
+        utilizations = get_all_subnet_utilizations(cursor)
         sites_subnets = {}
         for subnet in subnets:
             site = subnet[3] or 'Unassigned'
             if site not in sites_subnets:
                 sites_subnets[site] = []
-            
-            # Calculate utilization for each subnet
+
             subnet_id = subnet[0]
-            util = get_subnet_utilization(cursor, subnet_id)
+            util = utilizations.get(subnet_id, {'percent': 0})
             sites_subnets[site].append({
                 'id': subnet[0],
                 'name': subnet[1],
@@ -1295,8 +1335,6 @@ def devices():
     tag_filter = request.args.get('tag')
     
     with get_db_connection(current_app) as conn:
-        tag_filter = request.args.get('tag')
-        
         cursor = conn.cursor()
         
         # Base device query
@@ -1322,18 +1360,20 @@ def devices():
         for row in cursor.fetchall():
             device_ips.setdefault(row[0], []).append((row[1], row[2]))
         
-        # Get tags for each device
+        # Get tags for all devices in one query
         device_tags = {}
-        all_tag_names = []
-        for device in devices:
-            cursor.execute('''
-                SELECT t.id, t.name, t.color
+        if devices:
+            device_ids = [device[0] for device in devices]
+            placeholders = ','.join(['%s'] * len(device_ids))
+            cursor.execute(f'''
+                SELECT dt.device_id, t.id, t.name, t.color
                 FROM DeviceTag dt
                 JOIN Tag t ON dt.tag_id = t.id
-                WHERE dt.device_id = %s
+                WHERE dt.device_id IN ({placeholders})
                 ORDER BY t.name
-            ''', (device[0],))
-            device_tags[device[0]] = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
+            ''', tuple(device_ids))
+            for row in cursor.fetchall():
+                device_tags.setdefault(row[0], []).append({'id': row[1], 'name': row[2], 'color': row[3]})
         
         cursor.execute('SELECT DISTINCT name FROM Tag ORDER BY name')
         all_tag_names = [row[0] for row in cursor.fetchall()]
@@ -1415,31 +1455,22 @@ def device(device_id):
         
         cursor.execute('SELECT id, name, color FROM Tag ORDER BY name')
         all_tags = [{'id': row[0], 'name': row[1], 'color': row[2]} for row in cursor.fetchall()]
+
+        cursor.execute('''
+            SELECT ip.subnet_id, ip.id, ip.ip
+            FROM IPAddress ip
+            LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
+            WHERE dia.ip_id IS NULL
+            ORDER BY ip.subnet_id, INET_ATON(ip.ip)
+        ''')
+        unassigned_by_subnet = {}
+        for row in cursor.fetchall():
+            unassigned_by_subnet.setdefault(row[0], []).append({'id': row[1], 'ip': row[2]})
+
         available_ips_by_subnet = {}
         for subnet in subnets:
-            cursor.execute('''
-                SELECT ip.id, ip.ip FROM IPAddress ip
-                LEFT JOIN DeviceIPAddress dia ON ip.id = dia.ip_id
-                WHERE ip.subnet_id = %s AND dia.ip_id IS NULL
-            ''', (subnet['id'],))
-            ips = [{'id': row[0], 'ip': row[1]} for row in cursor.fetchall()]
-            cursor.execute('SELECT start_ip, end_ip, excluded_ips FROM DHCPPool WHERE subnet_id = %s', (subnet['id'],))
-            dhcp_row = cursor.fetchone()
-            if dhcp_row:
-                start_ip, end_ip, excluded_ips = dhcp_row
-                excluded_list = [ip for ip in (excluded_ips or '').replace(' ', '').split(',') if ip]
-                in_range = False
-                filtered_ips = []
-                for ip_obj in ips:
-                    ip = ip_obj['ip']
-                    if ip == start_ip:
-                        in_range = True
-                    if ip in excluded_list or not (in_range and ip not in excluded_list):
-                        filtered_ips.append(ip_obj)
-                    if ip == end_ip:
-                        in_range = False
-                ips = filtered_ips
-            available_ips_by_subnet[subnet['id']] = ips
+            ips = unassigned_by_subnet.get(subnet['id'], [])
+            available_ips_by_subnet[subnet['id']] = filter_ips_outside_dhcp(cursor, subnet['id'], ips)
         
         # Get custom fields for device
         custom_fields = get_custom_fields_for_entity('device', device_id, conn=conn)
@@ -1457,20 +1488,26 @@ def device(device_id):
                            custom_fields=custom_fields,
                            can_edit_device=has_permission('edit_device'))
 
-@app.route('/api/device/<int:device_id>/ip_history')
-@permission_required('view_device')
-def device_ip_history(device_id):
-    """Get IP history for a device as JSON"""
-    from flask import current_app
+@app.route('/ip/<path:ip_address>/history')
+@permission_required('view_subnet')
+def ip_address_history(ip_address):
+    """Get IP assignment history for the subnet UI."""
+    with get_db_connection(current_app) as conn:
+        ip_history = get_ip_history_from_audit_logs(ip_address=ip_address, conn=conn)
+    return jsonify({'history': ip_history, 'ip': ip_address})
+
+
+@app.route('/api/v1/devices/<int:device_id>/ip_history', methods=['GET'])
+@api_permission_required('view_device')
+def api_device_ip_history(device_id):
     with get_db_connection(current_app) as conn:
         ip_history = get_ip_history_from_audit_logs(device_id=device_id, conn=conn)
     return jsonify({'history': ip_history})
 
-@app.route('/api/ip/<ip_address>/history')
-@permission_required('view_subnet')
-def ip_address_history(ip_address):
-    """Get IP history for a specific IP address as JSON"""
-    from flask import current_app
+
+@app.route('/api/v1/ips/<path:ip_address>/history', methods=['GET'])
+@api_permission_required('view_subnet')
+def api_ip_address_history(ip_address):
     with get_db_connection(current_app) as conn:
         ip_history = get_ip_history_from_audit_logs(ip_address=ip_address, conn=conn)
     return jsonify({'history': ip_history, 'ip': ip_address})
@@ -2888,7 +2925,7 @@ def search():
 def api_info():
     """Get API information and authenticated user info"""
     return jsonify({
-        'api_version': '1.0',
+        'api_version': '2.0',
         'user': {
             'id': request.api_user['id'],
             'name': request.api_user['name'],

@@ -589,5 +589,31 @@ def init_db(app=None):
     create_index_if_not_exists(cursor, 'idx_customfield_entity_order', 'CustomFieldDefinition', 'entity_type, display_order')
     
     logging.info("Database indexes created successfully")
+
+    run_v2_migrations(cursor, conn)
+
     conn.commit()
     conn.close()
+
+
+def run_v2_migrations(cursor, conn):
+    """One-time schema cleanup for v2 upgrades from v1.x."""
+    logging.info("Running v2 database migrations...")
+
+    cursor.execute('DROP TABLE IF EXISTS FeatureFlags')
+
+    cursor.execute("SHOW COLUMNS FROM CustomFieldDefinition LIKE 'searchable'")
+    if cursor.fetchone():
+        cursor.execute('ALTER TABLE CustomFieldDefinition DROP COLUMN searchable')
+        logging.info("Dropped CustomFieldDefinition.searchable column")
+
+    for perm_name in ('view_help',):
+        cursor.execute('SELECT id FROM Permission WHERE name = %s', (perm_name,))
+        row = cursor.fetchone()
+        if row:
+            perm_id = row[0]
+            cursor.execute('DELETE FROM RolePermission WHERE permission_id = %s', (perm_id,))
+            cursor.execute('DELETE FROM Permission WHERE id = %s', (perm_id,))
+            logging.info("Removed orphaned permission: %s", perm_name)
+
+    logging.info("v2 database migrations complete")

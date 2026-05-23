@@ -85,6 +85,10 @@ GRANT ALL PRIVILEGES ON ipam.* TO 'ipam'@'%';
 FLUSH PRIVILEGES;
 ```
 
+### Upgrading from v1.x
+
+See [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md) for removed features, route changes, and automatic database migrations. Back up your database before upgrading.
+
 ## Usage
 
 ### First Login

@@ -214,11 +214,15 @@ Subnets must be `/24` or smaller (prefix length ≥ 24).
 
 | Method | Endpoint | Permission | Description |
 |--------|----------|------------|-------------|
-| GET | `/api/v1/info` | *(authenticated)* | API version and current user info |
+| GET | `/api/v1/info` | *(authenticated)* | API version (`2.0`) and current user info |
 | GET | `/api/v1/device-types` | `view_device_types` | List device types |
+| GET | `/api/v1/devices/{id}/ip_history` | `view_device` | IP assignment history for a device |
+| GET | `/api/v1/ips/{ip}/history` | `view_subnet` | IP assignment history for an address |
 | GET | `/api/v1/audit` | `view_audit` | List audit log entries (`limit`, `offset` query params) |
 | GET | `/api/v1/users` | `view_users` | List users |
 | GET | `/api/v1/roles` | `view_users` | List roles with permissions |
+
+Mutating API calls (`POST`, `PUT`, `DELETE`, `PATCH`) are logged to the audit log as `api_usage`. GET requests are not audited (v2 change — see [v1-to-v2-breaking-changes.md](v1-to-v2-breaking-changes.md)).
 
 ---
 

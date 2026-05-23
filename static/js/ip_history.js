@@ -41,7 +41,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function loadIPHistory(ip) {
         content.innerHTML = '<div class="text-center text-gray-600 dark:text-gray-400">Loading...</div>';
         
-        fetch(`/api/ip/${encodeURIComponent(ip)}/history`)
+        fetch(`/ip/${encodeURIComponent(ip)}/history`)
             .then(response => response.json())
             .then(data => {
                 if (data.history && data.history.length > 0) {
