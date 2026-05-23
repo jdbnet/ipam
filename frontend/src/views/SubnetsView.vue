@@ -89,11 +89,26 @@ async function del(id: number) {
       <p v-if="err" class="text-sm text-red-500 sm:col-span-3">{{ err }}</p>
     </form>
     <ul class="mt-8 space-y-2">
-      <li v-for="s in subnets" :key="s.id" class="card flex flex-wrap items-center justify-between gap-2">
+      <li
+        class="hidden px-4 text-xs font-medium text-slate-500 sm:grid sm:grid-cols-[minmax(0,1.5fr)_minmax(9rem,1fr)_5.5rem_auto] sm:items-center sm:gap-4"
+      >
+        <span>Name</span>
+        <span>CIDR</span>
+        <span>VLAN</span>
+        <span class="text-right">Actions</span>
+      </li>
+      <li
+        v-for="s in subnets"
+        :key="s.id"
+        class="card grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1.5fr)_minmax(9rem,1fr)_5.5rem_auto] sm:items-center sm:gap-4"
+      >
         <RouterLink :to="`/subnets/${s.id}`" class="font-medium text-accent hover:underline">{{ s.name }}</RouterLink>
         <span class="font-mono text-sm text-slate-500">{{ s.cidr }}</span>
-        <span v-if="s.vlan_id" class="rounded-full bg-surface-overlay px-2 py-0.5 text-xs">VLAN {{ s.vlan_id }}</span>
-        <div class="flex gap-2">
+        <span class="text-xs">
+          <span v-if="s.vlan_id" class="inline-block rounded-full bg-surface-overlay px-2 py-0.5">VLAN {{ s.vlan_id }}</span>
+          <span v-else class="text-slate-500">—</span>
+        </span>
+        <div class="flex gap-2 sm:justify-end">
           <button v-if="auth.can('edit_subnet')" class="text-sm text-accent hover:underline" @click="openEdit(s)">Edit</button>
           <button v-if="auth.can('delete_subnet')" class="text-sm text-red-500" @click="del(s.id)">Delete</button>
         </div>
