@@ -77,7 +77,7 @@ function formatHour(h: number) {
           <div>
             <div class="text-xs font-medium uppercase tracking-wide text-slate-500">Total IPv4 addresses</div>
             <div class="mt-1 text-2xl font-bold text-accent">{{ stats.total_ips.toLocaleString() }}</div>
-            <div class="text-sm text-slate-500">{{ stats.utilization_percent }}% utilized</div>
+            <div class="text-sm text-slate-500">{{ stats.utilization_percent }}% utilised</div>
           </div>
         </div>
         <div class="card flex items-start gap-4">
@@ -163,7 +163,7 @@ function formatHour(h: number) {
             <tr class="border-b border-slate-200 text-xs font-medium uppercase tracking-wide text-slate-500 dark:border-slate-700">
               <th class="p-2">Subnet</th>
               <th class="p-2">Name</th>
-              <th class="p-2">Utilized</th>
+              <th class="p-2">Utilised</th>
               <th class="p-2">Available</th>
               <th class="p-2">Site</th>
               <th class="p-2">Status</th>

@@ -50,7 +50,7 @@ function isDhcpRow(hostname?: string) {
 </script>
 <template>
   <div>
-    <RouterLink to="/" class="text-sm text-accent hover:underline">← Home</RouterLink>
+    <RouterLink to="/subnets" class="text-sm text-accent hover:underline">← Subnets</RouterLink>
     <p v-if="loading" class="mt-8 text-slate-500">Loading…</p>
     <p v-else-if="error" class="mt-8 text-red-500">{{ error }}</p>
     <template v-else-if="subnet">
