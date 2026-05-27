@@ -10,7 +10,6 @@ interface DashboardStats {
   available_ips: number;
   utilization_percent: number;
   subnet_count: number;
-  alerting_subnets: number;
   device_count: number;
 }
 
@@ -22,7 +21,6 @@ interface SubnetOverviewRow {
   vlan_id?: number;
   utilization: number;
   available: number;
-  status: "active" | "alerting";
 }
 
 interface ActivityPoint {
@@ -93,10 +91,7 @@ function formatHour(h: number) {
           <div>
             <div class="text-xs font-medium uppercase tracking-wide text-slate-500">Subnets</div>
             <div class="mt-1 text-2xl font-bold">{{ stats.subnet_count }}</div>
-            <div class="text-sm text-slate-500">
-              Total
-              <span v-if="stats.alerting_subnets" class="text-red-500">/ {{ stats.alerting_subnets }} alerting</span>
-            </div>
+            <div class="text-sm text-slate-500">Total</div>
           </div>
         </div>
         <div class="card flex items-start gap-4">
@@ -166,7 +161,6 @@ function formatHour(h: number) {
               <th class="p-2">Utilised</th>
               <th class="p-2">Available</th>
               <th class="p-2">Site</th>
-              <th class="p-2">Status</th>
             </tr>
           </thead>
           <tbody>
@@ -174,7 +168,6 @@ function formatHour(h: number) {
               v-for="s in subnetOverview"
               :key="s.id"
               class="border-b border-slate-100 dark:border-slate-800"
-              :class="s.status === 'alerting' ? 'bg-red-500/5' : ''"
             >
               <td class="p-2">
                 <RouterLink :to="`/subnets/${s.id}`" class="font-mono text-accent hover:underline">{{ s.cidr }}</RouterLink>
@@ -184,8 +177,7 @@ function formatHour(h: number) {
                 <div class="flex items-center gap-2">
                   <div class="h-1.5 w-16 overflow-hidden rounded-full bg-surface-overlay">
                     <div
-                      class="h-full rounded-full"
-                      :class="s.status === 'alerting' ? 'bg-red-500' : 'bg-accent'"
+                      class="h-full rounded-full bg-accent"
                       :style="{ width: `${s.utilization}%` }"
                     />
                   </div>
@@ -194,18 +186,9 @@ function formatHour(h: number) {
               </td>
               <td class="p-2">{{ s.available }}</td>
               <td class="p-2">{{ s.site }}</td>
-              <td class="p-2">
-                <span
-                  class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium"
-                  :class="s.status === 'alerting' ? 'bg-red-500/15 text-red-500' : 'bg-accent/15 text-accent'"
-                >
-                  <span class="h-1.5 w-1.5 rounded-full" :class="s.status === 'alerting' ? 'bg-red-500' : 'bg-accent'" />
-                  {{ s.status === 'alerting' ? 'Alerting' : 'Active' }}
-                </span>
-              </td>
             </tr>
             <tr v-if="!subnetOverview.length">
-              <td colspan="6" class="p-4 text-center text-slate-500">No subnets configured.</td>
+              <td colspan="5" class="p-4 text-center text-slate-500">No subnets configured.</td>
             </tr>
           </tbody>
         </table>
