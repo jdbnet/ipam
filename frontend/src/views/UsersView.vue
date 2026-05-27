@@ -140,10 +140,21 @@ async function delRole(id: number) {
         <button v-if="auth.can('manage_users')" class="btn-primary text-sm" @click="openAddUser">Add user</button>
       </div>
       <ul class="space-y-2">
-        <li v-for="u in users" :key="u.id" class="card flex flex-wrap items-center justify-between gap-2">
-          <span>{{ u.name }} <span class="text-slate-500">&lt;{{ u.email }}&gt;</span></span>
+        <li
+          class="hidden px-4 text-xs font-medium text-slate-500 sm:grid sm:grid-cols-[minmax(0,1fr)_8rem_13rem] sm:items-center sm:gap-4"
+        >
+          <span>User</span>
+          <span>Role</span>
+          <span v-if="auth.can('manage_users')" class="text-right">Actions</span>
+        </li>
+        <li
+          v-for="u in users"
+          :key="u.id"
+          class="card grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_8rem_13rem] sm:items-center sm:gap-4"
+        >
+          <span class="min-w-0">{{ u.name }} <span class="text-slate-500">&lt;{{ u.email }}&gt;</span></span>
           <span class="text-sm text-slate-500">{{ u.role_name }}</span>
-          <div v-if="auth.can('manage_users')" class="flex gap-2">
+          <div v-if="auth.can('manage_users')" class="flex gap-2 sm:justify-end">
             <button class="text-sm text-accent hover:underline" @click="openEditUser(u)">Edit</button>
             <button class="text-sm text-accent hover:underline" @click="regenKey(u.id)">API key</button>
             <button class="text-sm text-red-500 hover:underline" @click="delUser(u.id)">Delete</button>
