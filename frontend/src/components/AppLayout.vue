@@ -92,16 +92,16 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex min-h-screen bg-surface font-sans">
+  <div class="flex h-screen overflow-hidden bg-surface font-sans">
     <!-- Mobile overlay -->
     <div v-if="sidebarOpen" class="fixed inset-0 z-40 bg-black/50 lg:hidden" @click="sidebarOpen = false" />
 
     <!-- Sidebar -->
     <aside
-      class="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-slate-200 bg-surface-raised transition-transform dark:border-slate-800 lg:static lg:translate-x-0"
+      class="fixed inset-y-0 left-0 z-50 flex h-full w-64 shrink-0 flex-col border-r border-slate-200 bg-surface-raised transition-transform dark:border-slate-800 lg:static lg:h-screen lg:translate-x-0"
       :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
     >
-      <div class="flex items-center gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
+      <div class="flex shrink-0 items-center gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
         <img v-if="auth.org.logo" :src="auth.org.logo" alt="" class="h-8 rounded" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-sm font-semibold">{{ auth.org.name }} IPAM</div>
@@ -114,7 +114,7 @@ onUnmounted(() => {
         </div>
         <button class="lg:hidden" @click="sidebarOpen = false"><X class="h-5 w-5" /></button>
       </div>
-      <nav class="flex-1 overflow-y-auto p-2">
+      <nav class="min-h-0 flex-1 overflow-y-auto p-2">
         <RouterLink
           v-for="item in nav"
           :key="item.to"
@@ -129,15 +129,15 @@ onUnmounted(() => {
           {{ item.label }}
         </RouterLink>
       </nav>
-      <div class="border-t border-slate-200 p-3 dark:border-slate-800">
+      <div class="shrink-0 border-t border-slate-200 p-3 dark:border-slate-800">
         <div class="truncate text-xs text-slate-500">{{ auth.user?.name }}</div>
         <button class="mt-2 text-xs text-accent hover:underline" @click="logout">Sign out</button>
       </div>
     </aside>
 
     <!-- Main -->
-    <div class="flex min-w-0 flex-1 flex-col">
-      <header class="flex items-center gap-3 border-b border-slate-200 bg-surface-raised px-4 py-3 dark:border-slate-800">
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+      <header class="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-surface-raised px-4 py-3 dark:border-slate-800">
         <button class="lg:hidden" @click="sidebarOpen = true"><Menu class="h-6 w-6" /></button>
         <span class="font-semibold lg:hidden">{{ auth.org.name }} IPAM</span>
         <button
@@ -148,7 +148,7 @@ onUnmounted(() => {
           <Search class="h-5 w-5" />
         </button>
       </header>
-      <main class="flex-1 overflow-auto p-4 md:p-6">
+      <main class="min-h-0 flex-1 overflow-auto p-4 md:p-6">
         <RouterView />
       </main>
     </div>
