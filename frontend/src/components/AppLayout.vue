@@ -5,6 +5,8 @@ import { Menu, Search, X, Home, Server, Grid3x3, Settings, Users, Tag, Layers, F
 import { useAuthStore } from "@/stores/auth";
 import { api } from "@/api";
 
+const RELEASES_URL = "https://git.jdbnet.co.uk/jamie/ipam/releases";
+
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
@@ -103,7 +105,12 @@ onUnmounted(() => {
         <img v-if="auth.org.logo" :src="auth.org.logo" alt="" class="h-8 rounded" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-sm font-semibold">{{ auth.org.name }} IPAM</div>
-          <div class="text-xs text-slate-500">{{ auth.version }}</div>
+          <a
+            :href="RELEASES_URL"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-xs text-slate-500 hover:text-accent hover:underline"
+          >{{ auth.version }}</a>
         </div>
         <button class="lg:hidden" @click="sidebarOpen = false"><X class="h-5 w-5" /></button>
       </div>
