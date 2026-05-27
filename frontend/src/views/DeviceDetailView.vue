@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { useRoute, useRouter, RouterLink } from "vue-router";
 import { api, type Device, type Tag, type Subnet } from "@/api";
 import type { IpHistoryEntry } from "@/components/IpHistoryModal.vue";
@@ -70,7 +70,15 @@ async function loadDevice() {
   }
 }
 
-onMounted(loadDevice);
+watch(
+  () => route.params.id,
+  () => {
+    showAssignIp.value = false;
+    err.value = "";
+    loadDevice();
+  },
+  { immediate: true },
+);
 
 async function loadAvailableIps(subnetId: number) {
   if (!subnetId) {
