@@ -37,11 +37,14 @@ app.config['MYSQL_PASSWORD'] = os.environ.get('MYSQL_PASSWORD', 'password')
 app.config['MYSQL_DATABASE'] = os.environ.get('MYSQL_DATABASE', 'ipam')
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['NAME'] = os.environ.get('NAME', 'JDB-NET')
-app.config['LOGO_PNG'] = os.environ.get('LOGO_PNG', 'https://assets.jdbnet.co.uk/projects/ipam.png')
+app.config['NAME'] = ''
+app.config['LOGO_PNG'] = ''
 app.config['VERSION'] = os.environ.get('VERSION', 'unknown')
 
-from db import init_db, hash_password, get_db_connection, verify_password, generate_api_key
+from db import (
+    init_db, hash_password, get_db_connection, verify_password, generate_api_key,
+    load_org_settings, save_org_settings, org_branding,
+)
 
 # ── TOTP / 2FA helpers ───────────────────────────────────────────────────────
 def generate_totp_secret():
@@ -1260,17 +1263,18 @@ def api_auth_logout():
 
 @app.route('/api/v2/auth/me', methods=['GET'])
 def api_auth_me():
+    branding = org_branding()
     user = resolve_auth()
     if not user:
         return jsonify({
             'logged_in': False,
             'app_version': app.config['VERSION'],
-            'org': {'name': app.config['NAME'], 'logo': app.config['LOGO_PNG']},
+            'org': branding,
         })
     return jsonify({
         'logged_in': True,
         'app_version': app.config['VERSION'],
-        'org': {'name': app.config['NAME'], 'logo': app.config['LOGO_PNG']},
+        'org': branding,
         'user': {'id': user['id'], 'name': user['name'], 'email': user.get('email', '')},
         'permissions': sorted(user.get('permissions') or []),
     })
@@ -3048,6 +3052,36 @@ def api_delete_role(role_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/v2/settings', methods=['GET'])
+@require_permission('view_settings')
+def api_get_settings():
+    return jsonify({
+        'org_name': app.config['NAME'],
+        'org_logo': app.config['LOGO_PNG'],
+    })
+
+
+@app.route('/api/v2/settings', methods=['PUT'])
+@require_permission('manage_settings')
+def api_update_settings():
+    data = json_body()
+    name = (data.get('org_name') or '').strip()
+    logo = (data.get('org_logo') or '').strip()
+    save_org_settings(current_app, name, logo)
+    with get_db_connection(current_app) as conn:
+        add_audit_log(
+            get_current_user_id(),
+            'update_settings',
+            f"Updated organisation settings (name: {name or '(default)'})",
+            conn=conn,
+        )
+    return jsonify({
+        'org_name': name,
+        'org_logo': logo,
+        'org': org_branding(),
+    })
+
+
 @app.route('/api/v2/permissions', methods=['GET'])
 @require_permission('manage_roles')
 def api_permissions():
@@ -3166,7 +3200,7 @@ DIST = os.path.join(STATIC_ROOT, 'dist')
 
 @app.route('/favicon.ico')
 def favicon():
-    logo = app.config['LOGO_PNG']
+    logo = org_branding()['logo']
     if logo.startswith(('http://', 'https://')):
         return redirect(logo)
     path = logo if os.path.isabs(logo) else os.path.join(os.path.dirname(os.path.abspath(__file__)), logo)
@@ -3200,6 +3234,7 @@ def spa(path):
 
 # ── App startup ───────────────────────────────────────────────────────────────
 init_db(app)
+load_org_settings(app)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

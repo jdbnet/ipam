@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
-import { Menu, Search, X, Home, Server, Grid3x3, Settings, Users, Tag, Layers, FileText, User, Network } from "lucide-vue-next";
+import { Menu, Search, X, Home, Server, Grid3x3, Settings, SlidersHorizontal, Users, Tag, Layers, FileText, User, Network } from "lucide-vue-next";
 import { useAuthStore } from "@/stores/auth";
 import { api } from "@/api";
-
-const RELEASES_URL = "https://git.jdbnet.co.uk/jamie/ipam/releases";
 
 const auth = useAuthStore();
 const route = useRoute();
@@ -27,6 +25,7 @@ const nav = computed(() =>
     { to: "/audit", label: "Audit", icon: FileText, perm: "view_audit" },
     { to: "/subnets/manage", label: "Subnet Management", icon: Settings, perm: "view_admin" },
     { to: "/users", label: "Users", icon: Users, perm: "view_users" },
+    { to: "/settings", label: "Settings", icon: SlidersHorizontal, perm: "view_settings" },
     { to: "/custom-fields", label: "Fields", icon: Layers, perm: "view_custom_fields" },
     { to: "/account", label: "Account", icon: User, perm: null },
   ].filter((n) => !n.perm || auth.can(n.perm)),
@@ -101,16 +100,11 @@ onUnmounted(() => {
       class="fixed inset-y-0 left-0 z-50 flex h-full w-64 shrink-0 flex-col border-r border-slate-200 bg-surface-raised transition-transform dark:border-slate-800 lg:static lg:h-screen lg:translate-x-0"
       :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
     >
-      <div class="flex shrink-0 items-center gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
-        <img v-if="auth.org.logo" :src="auth.org.logo" alt="" class="h-8 rounded" />
-        <div class="min-w-0 flex-1">
+      <div class="flex h-14 shrink-0 items-center gap-2.5 border-b border-slate-200 px-4 dark:border-slate-800">
+        <img v-if="auth.org.logo" :src="auth.org.logo" alt="" class="h-7 shrink-0 rounded" />
+        <div class="min-w-0 flex-1 leading-tight">
           <div class="truncate text-sm font-semibold">{{ auth.org.name }} IPAM</div>
-          <a
-            :href="RELEASES_URL"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="text-xs text-slate-500 hover:text-accent hover:underline"
-          >{{ auth.version }}</a>
+          <div class="text-xs text-slate-500">{{ auth.version }}</div>
         </div>
         <button class="lg:hidden" @click="sidebarOpen = false"><X class="h-5 w-5" /></button>
       </div>
@@ -137,7 +131,7 @@ onUnmounted(() => {
 
     <!-- Main -->
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-      <header class="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-surface-raised px-4 py-3 dark:border-slate-800">
+      <header class="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-surface-raised px-4 dark:border-slate-800">
         <button class="lg:hidden" @click="sidebarOpen = true"><Menu class="h-6 w-6" /></button>
         <span class="font-semibold lg:hidden">{{ auth.org.name }} IPAM</span>
         <button

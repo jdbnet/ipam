@@ -28,6 +28,7 @@ const router = createRouter({
         { path: "subnets/manage", name: "subnet-management", component: () => import("@/views/SubnetsView.vue") },
         { path: "admin", redirect: "/subnets/manage" },
         { path: "users", name: "users", component: () => import("@/views/UsersView.vue") },
+        { path: "settings", name: "settings", component: () => import("@/views/SettingsView.vue") },
         { path: "account", name: "account", component: () => import("@/views/AccountView.vue") },
       ],
     },
