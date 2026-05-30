@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
-import { Menu, Search, X, Home, Server, Grid3x3, Settings, Users, Tag, Layers, FileText, User, Network } from "lucide-vue-next";
+import { Menu, Search, X, Home, Server, Grid3x3, Settings, SlidersHorizontal, Users, Tag, Layers, FileText, User, Network } from "lucide-vue-next";
 import { useAuthStore } from "@/stores/auth";
 import { api } from "@/api";
 
@@ -27,6 +27,7 @@ const nav = computed(() =>
     { to: "/audit", label: "Audit", icon: FileText, perm: "view_audit" },
     { to: "/subnets/manage", label: "Subnet Management", icon: Settings, perm: "view_admin" },
     { to: "/users", label: "Users", icon: Users, perm: "view_users" },
+    { to: "/settings", label: "Settings", icon: SlidersHorizontal, perm: "view_settings" },
     { to: "/custom-fields", label: "Fields", icon: Layers, perm: "view_custom_fields" },
     { to: "/account", label: "Account", icon: User, perm: null },
   ].filter((n) => !n.perm || auth.can(n.perm)),

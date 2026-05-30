@@ -154,6 +154,13 @@ def init_db(app=None):
         FOREIGN KEY (permission_id) REFERENCES Permission(id) ON DELETE CASCADE
     )
     ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS Setting (
+        setting_key VARCHAR(255) PRIMARY KEY,
+        value TEXT
+    )
+    ''')
     
     # Add role_id column to User table if it doesn't exist
     cursor.execute("SHOW COLUMNS FROM User LIKE 'role_id'")
@@ -363,6 +370,8 @@ def init_db(app=None):
         # Admin permissions
         ('manage_users', 'Manage users (add, edit, delete)', 'Admin'),
         ('manage_roles', 'Manage roles and permissions', 'Admin'),
+        ('view_settings', 'View Settings page', 'Admin'),
+        ('manage_settings', 'Manage organisation settings', 'Admin'),
     ]
     
     # Insert permissions
@@ -596,3 +605,80 @@ def run_v2_migrations(cursor, conn):
             logging.info("Removed orphaned permission: %s", perm_name)
 
     logging.info("v2 database migrations complete")
+
+
+DEFAULT_ORG_NAME = 'JDB-NET'
+DEFAULT_ORG_LOGO = 'https://assets.jdbnet.co.uk/projects/ipam.png'
+ORG_NAME_KEY = 'org_name'
+ORG_LOGO_KEY = 'org_logo'
+
+
+def get_setting(cursor, key):
+    cursor.execute('SELECT value FROM Setting WHERE setting_key = %s', (key,))
+    row = cursor.fetchone()
+    if not row or row[0] is None:
+        return ''
+    return row[0]
+
+
+def set_setting(cursor, key, value):
+    cursor.execute(
+        'INSERT INTO Setting (setting_key, value) VALUES (%s, %s) '
+        'ON DUPLICATE KEY UPDATE value = %s',
+        (key, value, value),
+    )
+
+
+def load_org_settings(app):
+    """Load org name/logo from DB; migrate from env vars when DB values are blank."""
+    env_name = (os.environ.get('NAME') or '').strip()
+    env_logo = (os.environ.get('LOGO_PNG') or '').strip()
+
+    conn = get_db_connection(app)
+    cursor = conn.cursor()
+    try:
+        name = get_setting(cursor, ORG_NAME_KEY).strip()
+        logo = get_setting(cursor, ORG_LOGO_KEY).strip()
+
+        if not name and env_name:
+            name = env_name
+            set_setting(cursor, ORG_NAME_KEY, name)
+            logging.info("Migrated organisation name from NAME env var to database")
+
+        if not logo and env_logo:
+            logo = env_logo
+            set_setting(cursor, ORG_LOGO_KEY, logo)
+            logging.info("Migrated organisation logo from LOGO_PNG env var to database")
+
+        app.config['NAME'] = name
+        app.config['LOGO_PNG'] = logo
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def save_org_settings(app, name, logo):
+    conn = get_db_connection(app)
+    cursor = conn.cursor()
+    try:
+        set_setting(cursor, ORG_NAME_KEY, name)
+        set_setting(cursor, ORG_LOGO_KEY, logo)
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+    app.config['NAME'] = name
+    app.config['LOGO_PNG'] = logo
+
+
+def org_branding(app=None):
+    """Return stored org branding with defaults applied for display."""
+    if app is None:
+        app = current_app
+    name = (app.config.get('NAME') or '').strip()
+    logo = (app.config.get('LOGO_PNG') or '').strip()
+    return {
+        'name': name or DEFAULT_ORG_NAME,
+        'logo': logo or DEFAULT_ORG_LOGO,
+    }

@@ -399,6 +399,14 @@ export const api = {
     );
     return d.items;
   },
+  async settings() {
+    return handle<{ org_name: string; org_logo: string }>(await fetchApi("/api/v2/settings"));
+  },
+  async updateSettings(body: { org_name: string; org_logo: string }) {
+    return handle<{ org_name: string; org_logo: string; org?: { name: string; logo: string } }>(
+      await fetchApi("/api/v2/settings", { method: "PUT", headers: jsonHeaders, body: JSON.stringify(body) }),
+    );
+  },
   async customFields(entityType: string) {
     const d = await handle<{ items: CustomFieldDef[] }>(await fetchApi(`/api/v2/custom_fields/${entityType}`));
     return d.items;
