@@ -14,7 +14,7 @@
   </p>
 
   <p>
-    <a href="https://www.jdbnet.co.uk/products/ipam"><strong>☁️ Managed hosting from £8/month →</strong></a>
+    <a href="https://www.jdbnet.co.uk/product/ipam"><strong>☁️ Managed hosting from £8/month →</strong></a>
   </p>
 </div>
 
@@ -77,7 +77,7 @@ on first run. Log in with `admin@example.com` / `password` and change the passwo
 Don't want to run it yourself? JDB-NET offers fully managed hosting from 
 **£8/month** - provisioned in under 10 minutes, no maintenance required.
 
-[→ jdbnet.co.uk/products/ipam](https://www.jdbnet.co.uk/products/ipam)
+[→ jdbnet.co.uk/products/ipam](https://www.jdbnet.co.uk/product/ipam)
 
 ## License
 
