@@ -17,6 +17,8 @@ from ipaddress import ip_network, ip_address, IPv4Address, IPv6Address
 import pyotp
 import qrcode
 import mysql.connector
+import requests
+from authlib.jose import jwt, JsonWebKey
 from dotenv import load_dotenv
 from flask import (
     Flask, session, request, abort, jsonify, redirect,
@@ -1219,6 +1221,191 @@ def group_devices_by_site(devices):
 
 # ── Auth & account (v2) ───────────────────────────────────────────────────────
 
+def get_sso_settings():
+    import os
+    return {
+        "enabled": os.environ.get("SSO_ENABLED", "false").lower() == "true",
+        "issuer": os.environ.get("SSO_ISSUER_URL", ""),
+        "client_id": os.environ.get("SSO_CLIENT_ID", ""),
+        "client_secret": os.environ.get("SSO_CLIENT_SECRET", ""),
+    }
+
+def get_public_base_url():
+    from flask import request
+    return request.host_url.rstrip("/")
+
+@app.route("/api/v2/auth/capabilities", methods=["GET"])
+def api_auth_capabilities():
+    sso = get_sso_settings()
+    return jsonify({
+        "sso_enabled": sso["enabled"],
+    })
+
+@app.route("/api/v2/auth/sso/login", methods=["GET"])
+def api_sso_login():
+    import secrets, base64, hashlib, requests, logging
+    sso = get_sso_settings()
+    if not sso["enabled"] or not sso["issuer"] or not sso["client_id"]:
+        return jsonify({"error": "SSO is not configured"}), 400
+
+    try:
+        resp = requests.get(f"{sso['issuer'].rstrip('/')}/.well-known/openid-configuration", timeout=10)
+        resp.raise_for_status()
+        oidc_config = resp.json()
+    except Exception as e:
+        logging.error(f"Failed to fetch OIDC configuration: {e}")
+        return jsonify({"error": "Failed to fetch OIDC configuration"}), 500
+
+    state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).decode("ascii").rstrip("=")
+
+    session["sso_state"] = state
+    session["sso_code_verifier"] = code_verifier
+    session.modified = True
+
+    redirect_uri = get_public_base_url() + "/sso/callback"
+    auth_endpoint = oidc_config["authorization_endpoint"]
+    
+    url = (
+        f"{auth_endpoint}?"
+        f"response_type=code&"
+        f"client_id={sso['client_id']}&"
+        f"redirect_uri={redirect_uri}&"
+        f"scope=openid email profile&"
+        f"state={state}&"
+        f"code_challenge={code_challenge}&"
+        f"code_challenge_method=S256"
+    )
+
+    return jsonify({"url": url})
+
+
+@app.route("/api/v2/auth/sso/callback", methods=["POST"])
+def api_sso_callback():
+    import requests, logging
+    from authlib.jose import jwt, JsonWebKey
+    from flask import current_app
+    data = request.get_json(silent=True) or {}
+    code = data.get("code")
+    state = data.get("state")
+
+    if not code or not state:
+        return jsonify({"error": "Missing code or state"}), 400
+
+    if state != session.get("sso_state"):
+        return jsonify({"error": "Invalid state"}), 400
+
+    code_verifier = session.get("sso_code_verifier")
+    if not code_verifier:
+        return jsonify({"error": "Missing code verifier in session"}), 400
+
+    sso = get_sso_settings()
+    if not sso["enabled"]:
+        return jsonify({"error": "SSO is not enabled"}), 400
+
+    try:
+        resp = requests.get(f"{sso['issuer'].rstrip('/')}/.well-known/openid-configuration", timeout=10)
+        resp.raise_for_status()
+        oidc_config = resp.json()
+    except Exception as e:
+        logging.error(f"Failed to fetch OIDC configuration: {e}")
+        return jsonify({"error": "Failed to fetch OIDC configuration"}), 500
+
+    token_endpoint = oidc_config["token_endpoint"]
+    redirect_uri = get_public_base_url() + "/sso/callback"
+
+    try:
+        token_resp = requests.post(
+            token_endpoint,
+            data={
+                "grant_type": "authorization_code",
+                "client_id": sso["client_id"],
+                "client_secret": sso["client_secret"],
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "code_verifier": code_verifier,
+            },
+            timeout=10,
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+    except Exception as e:
+        logging.error(f"SSO token exchange failed: {e}")
+        return jsonify({"error": "SSO token exchange failed"}), 401
+
+    id_token = token_data.get("id_token")
+    if not id_token:
+        return jsonify({"error": "No ID token returned"}), 400
+
+    try:
+        jwks_uri = oidc_config.get("jwks_uri")
+        if not jwks_uri:
+            raise ValueError("OIDC configuration is missing jwks_uri")
+            
+        jwks_resp = requests.get(jwks_uri, timeout=10)
+        jwks_resp.raise_for_status()
+        jwks_data = jwks_resp.json()
+        keys = JsonWebKey.import_key_set(jwks_data)
+        
+        claims_options = {
+            "iss": {"essential": True, "value": sso["issuer"]},
+            "aud": {"essential": True, "value": sso["client_id"]},
+            "exp": {"essential": True}
+        }
+        
+        claims = jwt.decode(id_token, keys, claims_options=claims_options)
+        claims.validate()
+        
+    except Exception as e:
+        logging.error(f"Failed to decode or validate ID token: {e}")
+        return jsonify({"error": "Invalid ID token"}), 400
+
+    email = claims.get("email")
+    if not email:
+        return jsonify({"error": "No email provided in ID token"}), 400
+
+    email = email.strip().lower()
+
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT id, name, email, password as password_hash, role_id, totp_secret, totp_enabled, two_fa_setup_complete "
+            "FROM User WHERE email = %s",
+            (email,),
+        )
+        user = cursor.fetchone()
+
+        if not user:
+            add_audit_log(None, "sso_failed", f"SSO login failed: User not found ({email})", conn=conn)
+            return jsonify({"error": "Account not found."}), 403
+
+        # SSO succeeded, check 2FA logic
+        cursor.execute('SELECT require_2fa FROM Role WHERE id = %s', (user['role_id'],))
+        role_result = cursor.fetchone()
+        role_requires_2fa = bool(role_result['require_2fa']) if role_result else False
+        user_wants_2fa = bool(user.get('totp_enabled'))
+        needs_2fa = role_requires_2fa or user_wants_2fa
+
+        if needs_2fa:
+            if user.get('two_fa_setup_complete'):
+                session['pending_user_id'] = user['id']
+                session.modified = True
+                return jsonify({'requires_2fa': True})
+            else:
+                session['pending_user_id_setup'] = user['id']
+                session.modified = True
+                return jsonify({'requires_setup': True})
+                
+        establish_user_session(user['id'], conn)
+        add_audit_log(user['id'], "login", "Successful SSO login", conn=conn)
+        
+    return jsonify({"ok": True})
+
+
 @app.route('/api/v2/auth/login', methods=['POST'])
 def api_auth_login():
     data = json_body()
@@ -1458,7 +1645,9 @@ def api_info():
             'id': get_current_user_id(),
             'name': current_user()['name'],
             'email': current_user()['email']
-        }
+        } if current_user() else None,
+        'permissions': list(current_user()['permissions']) if current_user() else [],
+        'org': org_branding(current_app),
     })
 
 # Devices API
@@ -3058,6 +3247,7 @@ def api_get_settings():
     return jsonify({
         'org_name': app.config['NAME'],
         'org_logo': app.config['LOGO_PNG'],
+        'accent_color': app.config.get('ACCENT_COLOR') or '#1ebe8a',
     })
 
 
@@ -3067,7 +3257,8 @@ def api_update_settings():
     data = json_body()
     name = (data.get('org_name') or '').strip()
     logo = (data.get('org_logo') or '').strip()
-    save_org_settings(current_app, name, logo)
+    accent_color = (data.get('accent_color') or '').strip()
+    save_org_settings(current_app, name, logo, accent_color)
     with get_db_connection(current_app) as conn:
         add_audit_log(
             get_current_user_id(),
@@ -3078,6 +3269,7 @@ def api_update_settings():
     return jsonify({
         'org_name': name,
         'org_logo': logo,
+        'accent_color': accent_color or '#1ebe8a',
         'org': org_branding(),
     })
 

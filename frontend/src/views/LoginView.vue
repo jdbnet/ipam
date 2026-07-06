@@ -1,15 +1,39 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
+import { api } from "@/api";
 
 const email = ref("");
 const password = ref("");
 const err = ref("");
 const busy = ref(false);
+const ssoEnabled = ref(false);
+const ssoLoading = ref(false);
 const auth = useAuthStore();
 const router = useRouter();
 const route = useRoute();
+
+onMounted(async () => {
+  try {
+    const caps = await api.capabilities();
+    ssoEnabled.value = caps.sso_enabled;
+  } catch (e) {
+    // ignore
+  }
+});
+
+async function startSsoLogin() {
+  err.value = "";
+  ssoLoading.value = true;
+  try {
+    const { url } = await api.startSsoLogin();
+    window.location.href = url;
+  } catch (e) {
+    err.value = e instanceof Error ? e.message : "SSO initiation failed";
+    ssoLoading.value = false;
+  }
+}
 
 async function submit() {
   err.value = "";
@@ -48,7 +72,12 @@ async function submit() {
           <input v-model="password" type="password" class="input-field" required autocomplete="current-password" />
         </div>
         <p v-if="err" class="text-sm text-red-500">{{ err }}</p>
-        <button type="submit" class="btn-primary w-full" :disabled="busy">{{ busy ? "Signing in…" : "Sign in" }}</button>
+        <button type="submit" class="btn-primary w-full" :disabled="busy || ssoLoading">{{ busy ? "Signing in…" : "Sign in" }}</button>
+        <div v-if="ssoEnabled" class="pt-4 border-t border-slate-200 dark:border-slate-800">
+          <button type="button" class="btn-secondary w-full" :disabled="ssoLoading || busy" @click="startSsoLogin">
+            {{ ssoLoading ? 'Redirecting…' : 'Sign in with Single Sign-On' }}
+          </button>
+        </div>
       </form>
     </div>
   </div>

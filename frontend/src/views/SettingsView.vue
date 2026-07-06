@@ -4,14 +4,14 @@ import { api } from "@/api";
 import { useAuthStore } from "@/stores/auth";
 
 const auth = useAuthStore();
-const form = ref({ org_name: "", org_logo: "" });
+const form = ref({ org_name: "", org_logo: "", accent_color: "" });
 const msg = ref("");
 const err = ref("");
 const busy = ref(false);
 
 async function load() {
   const data = await api.settings();
-  form.value = { org_name: data.org_name, org_logo: data.org_logo };
+  form.value = { org_name: data.org_name, org_logo: data.org_logo, accent_color: data.accent_color || "" };
 }
 
 onMounted(load);
@@ -22,7 +22,7 @@ async function save() {
   busy.value = true;
   try {
     const data = await api.updateSettings(form.value);
-    form.value = { org_name: data.org_name, org_logo: data.org_logo };
+    form.value = { org_name: data.org_name, org_logo: data.org_logo, accent_color: data.accent_color || "" };
     if (data.org) auth.org = data.org;
     else await auth.fetchMe();
     msg.value = "Settings saved";
@@ -55,6 +55,15 @@ async function save() {
       <div v-if="form.org_logo" class="rounded-lg border border-slate-200 p-4 dark:border-slate-700">
         <p class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">Preview</p>
         <img :src="form.org_logo" alt="" class="h-10 rounded" @error="($event.target as HTMLImageElement).style.display = 'none'" />
+      </div>
+
+      <div>
+        <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Accent Color</label>
+        <div class="flex items-center gap-3">
+          <input type="color" v-model="form.accent_color" class="h-10 w-16 cursor-pointer rounded border border-slate-200 bg-transparent p-0.5 dark:border-slate-700" />
+          <input v-model="form.accent_color" class="input-field font-mono text-sm w-32" placeholder="#1ebe8a" />
+        </div>
+        <p class="mt-1 text-xs text-slate-500">Hex format e.g. "#1ebe8a". Leave blank to use default.</p>
       </div>
 
       <div v-if="auth.can('manage_settings')" class="flex flex-wrap items-center gap-3">

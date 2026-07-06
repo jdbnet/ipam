@@ -23,7 +23,7 @@ function fetchApi(path: string, init?: RequestInit) {
 export interface MeResponse {
   logged_in: boolean;
   app_version?: string;
-  org?: { name: string; logo: string };
+  org?: { name: string; logo: string; accent_color?: string };
   user?: { id: number; name: string; email: string };
   permissions?: string[];
 }
@@ -146,6 +146,21 @@ export interface AuditParams {
 }
 
 export const api = {
+  async capabilities() {
+    return handle<{ sso_enabled: boolean }>(await fetchApi("/api/v2/auth/capabilities"));
+  },
+  async startSsoLogin() {
+    return handle<{ url: string }>(await fetchApi("/api/v2/auth/sso/login"));
+  },
+  async ssoCallback(code: string, state: string) {
+    return handle<{ ok?: boolean; requires_2fa?: boolean; requires_setup?: boolean }>(
+      await fetchApi("/api/v2/auth/sso/callback", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ code, state }),
+      })
+    );
+  },
   async me(): Promise<MeResponse> {
     return handle(await fetchApi("/api/v2/auth/me"));
   },
@@ -400,10 +415,10 @@ export const api = {
     return d.items;
   },
   async settings() {
-    return handle<{ org_name: string; org_logo: string }>(await fetchApi("/api/v2/settings"));
+    return handle<{ org_name: string; org_logo: string; accent_color?: string }>(await fetchApi("/api/v2/settings"));
   },
-  async updateSettings(body: { org_name: string; org_logo: string }) {
-    return handle<{ org_name: string; org_logo: string; org?: { name: string; logo: string } }>(
+  async updateSettings(body: { org_name: string; org_logo: string; accent_color?: string }) {
+    return handle<{ org_name: string; org_logo: string; accent_color?: string; org?: { name: string; logo: string; accent_color?: string } }>(
       await fetchApi("/api/v2/settings", { method: "PUT", headers: jsonHeaders, body: JSON.stringify(body) }),
     );
   },

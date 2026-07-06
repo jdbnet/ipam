@@ -609,8 +609,10 @@ def run_v2_migrations(cursor, conn):
 
 DEFAULT_ORG_NAME = 'JDB-NET'
 DEFAULT_ORG_LOGO = 'https://assets.jdbnet.co.uk/projects/ipam.png'
+DEFAULT_ACCENT_COLOR = '#1ebe8a'
 ORG_NAME_KEY = 'org_name'
 ORG_LOGO_KEY = 'org_logo'
+ACCENT_COLOR_KEY = 'accent_color'
 
 
 def get_setting(cursor, key):
@@ -639,6 +641,7 @@ def load_org_settings(app):
     try:
         name = get_setting(cursor, ORG_NAME_KEY).strip()
         logo = get_setting(cursor, ORG_LOGO_KEY).strip()
+        accent = get_setting(cursor, ACCENT_COLOR_KEY).strip()
 
         if not name and env_name:
             name = env_name
@@ -652,24 +655,29 @@ def load_org_settings(app):
 
         app.config['NAME'] = name
         app.config['LOGO_PNG'] = logo
+        app.config['ACCENT_COLOR'] = accent
         conn.commit()
     finally:
         cursor.close()
         conn.close()
 
 
-def save_org_settings(app, name, logo):
+def save_org_settings(app, name, logo, accent_color=None):
     conn = get_db_connection(app)
     cursor = conn.cursor()
     try:
         set_setting(cursor, ORG_NAME_KEY, name)
         set_setting(cursor, ORG_LOGO_KEY, logo)
+        if accent_color is not None:
+            set_setting(cursor, ACCENT_COLOR_KEY, accent_color)
         conn.commit()
     finally:
         cursor.close()
         conn.close()
     app.config['NAME'] = name
     app.config['LOGO_PNG'] = logo
+    if accent_color is not None:
+        app.config['ACCENT_COLOR'] = accent_color
 
 
 def org_branding(app=None):
@@ -678,7 +686,9 @@ def org_branding(app=None):
         app = current_app
     name = (app.config.get('NAME') or '').strip()
     logo = (app.config.get('LOGO_PNG') or '').strip()
+    accent = (app.config.get('ACCENT_COLOR') or '').strip()
     return {
         'name': name or DEFAULT_ORG_NAME,
         'logo': logo or DEFAULT_ORG_LOGO,
+        'accent_color': accent or DEFAULT_ACCENT_COLOR,
     }

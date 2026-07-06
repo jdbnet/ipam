@@ -36,7 +36,7 @@ const activity = ref<ActivityPoint[]>([]);
 
 const donutStyle = computed(() => {
   const pct = stats.value?.utilization_percent ?? 0;
-  return { background: `conic-gradient(rgb(6 182 212) ${pct}%, rgb(var(--surface-overlay)) ${pct}%)` };
+  return { background: `conic-gradient(rgb(var(--accent)) ${pct}%, rgb(var(--surface-overlay)) ${pct}%)` };
 });
 
 const maxActivity = computed(() => Math.max(1, ...activity.value.map((a) => a.count)));
@@ -128,7 +128,7 @@ function formatHour(h: number) {
         </div>
 
         <div class="card">
-          <h2 class="font-semibold">Activity — last 24 hours</h2>
+          <h2 class="font-semibold">Activity - last 24 hours</h2>
           <p class="mt-1 text-xs text-slate-500">Audit log entries by hour</p>
           <div class="mt-4 flex h-40 items-end gap-0.5">
             <div

@@ -230,7 +230,7 @@ async function delRole(id: number) {
     <div v-if="showApiKey" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="showApiKey = ''">
       <div class="card w-full max-w-md space-y-3">
         <h2 class="text-lg font-semibold">New API key</h2>
-        <p class="text-sm text-slate-500">Copy this key now — it won't be shown again.</p>
+        <p class="text-sm text-slate-500">Copy this key now - it won't be shown again.</p>
         <code class="block break-all rounded-lg bg-surface-overlay p-3 text-sm">{{ showApiKey }}</code>
         <button class="btn-primary" @click="showApiKey = ''">Done</button>
       </div>
