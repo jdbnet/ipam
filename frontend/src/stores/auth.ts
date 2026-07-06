@@ -7,7 +7,7 @@ export const useAuthStore = defineStore("auth", {
     loggedIn: false,
     user: null as MeResponse["user"] | null,
     permissions: [] as string[],
-    org: { name: "IPAM", logo: "" },
+    org: { name: "IPAM", logo: "", accent_color: "#1ebe8a" },
     version: "unknown",
   }),
   getters: {

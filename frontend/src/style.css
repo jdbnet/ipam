@@ -4,19 +4,19 @@
 
 @layer base {
   :root {
-    --surface: 248 250 252;
+    --surface: 240 246 252;
     --surface-raised: 255 255 255;
-    --surface-overlay: 241 245 249;
-    --accent: 6 182 212;
-    --accent-muted: 8 145 178;
+    --surface-overlay: 230 237 243;
+    --accent: 30 190 138;
+    --accent-muted: 24 152 110;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --surface: 15 20 25;
-      --surface-raised: 21 28 36;
-      --surface-overlay: 26 35 46;
-      --accent: 34 211 238;
-      --accent-muted: 6 182 212;
+      --surface: 13 17 23;
+      --surface-raised: 22 27 34;
+      --surface-overlay: 33 38 45;
+      --accent: 30 190 138;
+      --accent-muted: 24 152 110;
     }
   }
 }

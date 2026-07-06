@@ -7,6 +7,7 @@ const router = createRouter({
     { path: "/login", name: "login", component: () => import("@/views/LoginView.vue"), meta: { public: true } },
     { path: "/verify-2fa", name: "verify-2fa", component: () => import("@/views/Verify2faView.vue"), meta: { public: true } },
     { path: "/setup-2fa", name: "setup-2fa", component: () => import("@/views/Setup2faView.vue"), meta: { public: true } },
+    { path: "/sso/callback", name: "sso-callback", component: () => import("@/views/SSOCallbackView.vue"), meta: { public: true } },
     {
       path: "/",
       component: () => import("@/components/AppLayout.vue"),

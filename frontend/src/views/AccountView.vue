@@ -74,7 +74,7 @@ async function regenCodes() {
           </ul>
         </div>
         <div v-if="newBackupCodes.length">
-          <p class="text-sm font-medium text-accent">New backup codes — save these now:</p>
+          <p class="text-sm font-medium text-accent">New backup codes - save these now:</p>
           <ul class="mt-2 rounded-lg bg-surface-overlay p-3 font-mono text-sm">
             <li v-for="c in newBackupCodes" :key="c">{{ c }}</li>
           </ul>
@@ -87,7 +87,7 @@ async function regenCodes() {
             class="text-sm text-red-500 hover:underline"
             @click="disable2fa"
           >Disable 2FA</button>
-          <p v-else class="text-sm text-slate-500">Your role requires 2FA — it cannot be disabled.</p>
+          <p v-else class="text-sm text-slate-500">Your role requires 2FA - it cannot be disabled.</p>
         </div>
       </template>
       <template v-else>
