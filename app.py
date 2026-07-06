@@ -18,7 +18,10 @@ import pyotp
 import qrcode
 import mysql.connector
 import requests
-from authlib.jose import jwt, JsonWebKey
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    from authlib.jose import jwt, JsonWebKey
 from dotenv import load_dotenv
 from flask import (
     Flask, session, request, abort, jsonify, redirect,
@@ -1287,7 +1290,6 @@ def api_sso_login():
 @app.route("/api/v2/auth/sso/callback", methods=["POST"])
 def api_sso_callback():
     import requests, logging
-    from authlib.jose import jwt, JsonWebKey
     from flask import current_app
     data = request.get_json(silent=True) or {}
     code = data.get("code")
@@ -1383,23 +1385,6 @@ def api_sso_callback():
             add_audit_log(None, "sso_failed", f"SSO login failed: User not found ({email})", conn=conn)
             return jsonify({"error": "Account not found."}), 403
 
-        # SSO succeeded, check 2FA logic
-        cursor.execute('SELECT require_2fa FROM Role WHERE id = %s', (user['role_id'],))
-        role_result = cursor.fetchone()
-        role_requires_2fa = bool(role_result['require_2fa']) if role_result else False
-        user_wants_2fa = bool(user.get('totp_enabled'))
-        needs_2fa = role_requires_2fa or user_wants_2fa
-
-        if needs_2fa:
-            if user.get('two_fa_setup_complete'):
-                session['pending_user_id'] = user['id']
-                session.modified = True
-                return jsonify({'requires_2fa': True})
-            else:
-                session['pending_user_id_setup'] = user['id']
-                session.modified = True
-                return jsonify({'requires_setup': True})
-                
         establish_user_session(user['id'], conn)
         add_audit_log(user['id'], "login", "Successful SSO login", conn=conn)
         

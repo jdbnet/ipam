@@ -10,11 +10,20 @@ const auth = useAuthStore();
 const err = ref("");
 
 onMounted(async () => {
-  const code = route.query.code as string;
-  const state = route.query.state as string;
+  const urlParams = new URLSearchParams(window.location.search);
+  const code = (route.query.code as string) || urlParams.get("code");
+  const state = (route.query.state as string) || urlParams.get("state");
+
+  const ssoError = (route.query.error as string) || urlParams.get("error");
+  const ssoErrorDesc = (route.query.error_description as string) || urlParams.get("error_description");
+
+  if (ssoError) {
+    err.value = `SSO Error: ${ssoError} - ${ssoErrorDesc || "No description provided"}`;
+    return;
+  }
 
   if (!code || !state) {
-    err.value = "Missing callback parameters.";
+    err.value = `Missing callback parameters. URL: ${window.location.search}`;
     return;
   }
 
