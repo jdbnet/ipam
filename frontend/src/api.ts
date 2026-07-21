@@ -213,7 +213,7 @@ export const api = {
         available: number;
         status: "active" | "alerting";
       }[];
-      activity: { hour: number; count: number }[];
+      activity: string[];
     }>(await fetchApi("/api/v2/dashboard"));
   },
   async search(q: string) {

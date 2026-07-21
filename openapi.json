@@ -1,0 +1,2640 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "IPAM API",
+    "version": "2.0",
+    "description": "JSON REST API for IP Address Management (IPAM).\n\n**Authentication**\n- Browser UI: session cookie after `POST /auth/login` (send cookies on subsequent requests).\n- Automation: API key via `X-API-Key` header, `Authorization: Bearer <key>`, or `?api_key=` query parameter.\n  Regenerate keys from the Users page in the web UI.\n\n**Authorization**\nEach endpoint requires a permission (see `x-permission`). API keys inherit permissions from the user's role.\n\n**List responses**\nMost list endpoints return `{ \"items\": [...] }`. Audit log returns `{ \"items\", \"total\" }`."
+  },
+  "servers": [
+    {
+      "url": "/api/v2",
+      "description": "API v2 base path"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Authentication"
+    },
+    {
+      "name": "Account"
+    },
+    {
+      "name": "Info"
+    },
+    {
+      "name": "Dashboard"
+    },
+    {
+      "name": "Search"
+    },
+    {
+      "name": "Devices"
+    },
+    {
+      "name": "Subnets"
+    },
+    {
+      "name": "IP Addresses"
+    },
+    {
+      "name": "Tags"
+    },
+    {
+      "name": "Racks"
+    },
+    {
+      "name": "Custom Fields"
+    },
+    {
+      "name": "DHCP"
+    },
+    {
+      "name": "Audit"
+    },
+    {
+      "name": "Users"
+    },
+    {
+      "name": "Roles"
+    },
+    {
+      "name": "Permissions"
+    },
+    {
+      "name": "Settings"
+    },
+    {
+      "name": "Bulk"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API key as Bearer token"
+      },
+      "ApiKeyQuery": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "api_key"
+      },
+      "SessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session",
+        "description": "Flask session cookie after login (browser only)"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "permission": {
+            "type": "string",
+            "description": "Required permission when 403"
+          }
+        }
+      },
+      "OkResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ItemsResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {}
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          }
+        }
+      },
+      "Verify2faRequest": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "use_backup": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "Setup2faRequest": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "generate",
+              "verify"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "description": "Required when action is verify"
+          }
+        }
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          }
+        }
+      },
+      "PasswordConfirmRequest": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "DeviceCreate": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "DeviceUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "AssignIpRequest": {
+        "type": "object",
+        "required": [
+          "ip_id"
+        ],
+        "properties": {
+          "ip_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "SubnetCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "cidr"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "cidr": {
+            "type": "string",
+            "example": "10.0.0.0/24"
+          },
+          "site": {
+            "type": "string"
+          },
+          "vlan_id": {
+            "type": "integer",
+            "nullable": true
+          },
+          "vlan_description": {
+            "type": "string"
+          },
+          "vlan_notes": {
+            "type": "string"
+          }
+        }
+      },
+      "SubnetUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "cidr": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "vlan_id": {
+            "type": "integer",
+            "nullable": true
+          },
+          "vlan_description": {
+            "type": "string"
+          },
+          "vlan_notes": {
+            "type": "string"
+          }
+        }
+      },
+      "RackCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "site",
+          "height_u"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "height_u": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "RackUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "height_u": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "RackDeviceCreate": {
+        "type": "object",
+        "required": [
+          "position_u",
+          "side"
+        ],
+        "properties": {
+          "position_u": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "device_id": {
+            "type": "integer",
+            "description": "Networked device (mutually exclusive with nonnet_device_name)"
+          },
+          "nonnet_device_name": {
+            "type": "string",
+            "description": "Label for non-networked equipment"
+          }
+        }
+      },
+      "CustomFieldCreate": {
+        "type": "object",
+        "required": [
+          "entity_type",
+          "name",
+          "field_key",
+          "field_type"
+        ],
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "device",
+              "subnet"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "field_key": {
+            "type": "string"
+          },
+          "field_type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "textarea",
+              "number",
+              "select",
+              "checkbox",
+              "date"
+            ]
+          },
+          "required": {
+            "type": "boolean",
+            "default": false
+          },
+          "default_value": {
+            "type": "string",
+            "nullable": true
+          },
+          "help_text": {
+            "type": "string",
+            "nullable": true
+          },
+          "display_order": {
+            "type": "integer",
+            "default": 0
+          },
+          "validation_rules": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "CustomFieldUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "field_type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "textarea",
+              "number",
+              "select",
+              "checkbox",
+              "date"
+            ]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "default_value": {
+            "type": "string",
+            "nullable": true
+          },
+          "help_text": {
+            "type": "string",
+            "nullable": true
+          },
+          "display_order": {
+            "type": "integer"
+          },
+          "validation_rules": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "CustomFieldsPatch": {
+        "type": "object",
+        "properties": {
+          "custom_fields": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "CustomFieldReorder": {
+        "type": "object",
+        "required": [
+          "entity_type",
+          "field_orders"
+        ],
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "device",
+              "subnet"
+            ]
+          },
+          "field_orders": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Map of field definition ID to display order"
+          }
+        }
+      },
+      "DhcpConfigure": {
+        "type": "object",
+        "properties": {
+          "remove": {
+            "type": "boolean",
+            "description": "If true, remove the DHCP pool for this subnet"
+          },
+          "pools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "start_ip",
+                "end_ip"
+              ],
+              "properties": {
+                "start_ip": {
+                  "type": "string"
+                },
+                "end_ip": {
+                  "type": "string"
+                },
+                "excluded_ips": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "TagCreate": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string",
+            "default": "#6B7280"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "TagUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "AssignTagRequest": {
+        "type": "object",
+        "required": [
+          "tag_id"
+        ],
+        "properties": {
+          "tag_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "IpNotesPatch": {
+        "type": "object",
+        "required": [
+          "notes"
+        ],
+        "properties": {
+          "notes": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "UserCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "email",
+          "password"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string"
+          },
+          "role_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "UserUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string"
+          },
+          "role_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "RoleCreate": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "require_2fa": {
+            "type": "boolean",
+            "default": false
+          },
+          "permission_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "RoleUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "require_2fa": {
+            "type": "boolean"
+          },
+          "permission_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "SettingsUpdate": {
+        "type": "object",
+        "properties": {
+          "org_name": {
+            "type": "string"
+          },
+          "org_logo": {
+            "type": "string",
+            "description": "URL or path to PNG logo"
+          },
+          "accent_color": {
+            "type": "string",
+            "example": "#1ebe8a"
+          }
+        }
+      },
+      "BulkAssignIps": {
+        "type": "object",
+        "required": [
+          "device_id",
+          "ip_ids"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "integer"
+          },
+          "ip_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "BulkCreateDevices": {
+        "type": "object",
+        "required": [
+          "names"
+        ],
+        "properties": {
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "BulkAssignTags": {
+        "type": "object",
+        "required": [
+          "device_ids",
+          "tag_id"
+        ],
+        "properties": {
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "tag_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "BulkExportSubnets": {
+        "type": "object",
+        "required": [
+          "subnet_ids"
+        ],
+        "properties": {
+          "subnet_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    "parameters": {
+      "deviceId": {
+        "name": "device_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "subnetId": {
+        "name": "subnet_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "rackId": {
+        "name": "rack_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "rackDeviceId": {
+        "name": "rack_device_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "tagId": {
+        "name": "tag_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "ipId": {
+        "name": "ip_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "fieldId": {
+        "name": "field_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "userId": {
+        "name": "user_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "roleId": {
+        "name": "role_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "entityType": {
+        "name": "entity_type",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "device",
+            "subnet"
+          ]
+        }
+      },
+      "tagIdentifier": {
+        "name": "tag_identifier",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Tag name or numeric tag ID"
+      },
+      "ipAddress": {
+        "name": "ip_address",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "IPv4 address (e.g. 10.0.0.1)"
+      },
+      "auditLimit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "default": 100
+        }
+      },
+      "auditOffset": {
+        "name": "offset",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "default": 0
+        }
+      },
+      "auditUser": {
+        "name": "user",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Partial user name match"
+      },
+      "auditAction": {
+        "name": "action",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Exact action name"
+      },
+      "auditFrom": {
+        "name": "from",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "format": "date"
+        },
+        "description": "Start date YYYY-MM-DD"
+      },
+      "auditTo": {
+        "name": "to",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "format": "date"
+        },
+        "description": "End date YYYY-MM-DD"
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Not authenticated",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Missing permission",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "Invalid request",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyHeader": []
+    },
+    {
+      "BearerAuth": []
+    },
+    {
+      "ApiKeyQuery": []
+    },
+    {
+      "SessionCookie": []
+    }
+  ],
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "summary": "Log in with email and password",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login OK or 2FA required"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Authentication"
+        ]
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "summary": "Log out and clear session",
+        "responses": {
+          "200": {
+            "description": "Session cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Authentication"
+        ]
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "summary": "Current session, permissions, and org branding",
+        "responses": {
+          "200": {
+            "description": "Auth state"
+          }
+        },
+        "tags": [
+          "Authentication"
+        ]
+      }
+    },
+    "/auth/verify-2fa": {
+      "post": {
+        "summary": "Complete login with TOTP or backup code",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Verify2faRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login complete"
+          }
+        },
+        "tags": [
+          "Authentication"
+        ]
+      }
+    },
+    "/auth/setup-2fa": {
+      "post": {
+        "summary": "Generate or verify TOTP setup",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Setup2faRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Secret/QR or setup complete"
+          }
+        },
+        "tags": [
+          "Authentication"
+        ]
+      }
+    },
+    "/account": {
+      "get": {
+        "summary": "Account profile and 2FA status",
+        "security": [
+          {
+            "ApiKeyHeader": []
+          },
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyQuery": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account details"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/account/change-password": {
+      "post": {
+        "summary": "Change password",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password updated"
+          }
+        },
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/account/disable-2fa": {
+      "post": {
+        "summary": "Disable two-factor authentication",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "2FA disabled"
+          }
+        },
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/account/regenerate-backup-codes": {
+      "post": {
+        "summary": "Regenerate 2FA backup codes",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New backup codes"
+          }
+        },
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/info": {
+      "get": {
+        "summary": "API version and authenticated user info",
+        "responses": {
+          "200": {
+            "description": "API info"
+          }
+        },
+        "tags": [
+          "Info"
+        ]
+      }
+    },
+    "/dashboard": {
+      "get": {
+        "summary": "Dashboard statistics and activity",
+        "responses": {
+          "200": {
+            "description": "Stats, subnet overview, activity timestamps"
+          }
+        },
+        "x-permission": "view_index",
+        "tags": [
+          "Dashboard"
+        ]
+      }
+    },
+    "/search": {
+      "get": {
+        "summary": "Global search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Search query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching subnets, IPs, devices, tags, racks, sites"
+          }
+        },
+        "tags": [
+          "Search"
+        ]
+      }
+    },
+    "/devices": {
+      "get": {
+        "summary": "List devices",
+        "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by tag name"
+          },
+          {
+            "name": "site",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by site (use Unassigned for null)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemsResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-permission": "view_devices",
+        "tags": [
+          "Devices"
+        ]
+      },
+      "post": {
+        "summary": "Create device",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Device created"
+          }
+        },
+        "x-permission": "add_device",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/devices/{device_id}": {
+      "get": {
+        "summary": "Get device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device with IPs, tags, custom fields"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-permission": "view_device",
+        "tags": [
+          "Devices"
+        ]
+      },
+      "put": {
+        "summary": "Update device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device updated"
+          }
+        },
+        "x-permission": "edit_device",
+        "tags": [
+          "Devices"
+        ]
+      },
+      "delete": {
+        "summary": "Delete device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device deleted"
+          }
+        },
+        "x-permission": "delete_device",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/devices/{device_id}/ips": {
+      "post": {
+        "summary": "Assign IP to device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignIpRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "IP assigned"
+          }
+        },
+        "x-permission": "add_device_ip",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/devices/{device_id}/ips/{ip_id}": {
+      "delete": {
+        "summary": "Remove IP from device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          },
+          {
+            "$ref": "#/components/parameters/ipId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "IP removed"
+          }
+        },
+        "x-permission": "remove_device_ip",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/devices/{device_id}/ip-history": {
+      "get": {
+        "summary": "IP assignment history for device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History items"
+          }
+        },
+        "x-permission": "view_device",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/devices/{device_id}/custom-fields": {
+      "patch": {
+        "summary": "Update device custom field values",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldsPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fields updated"
+          }
+        },
+        "x-permission": "edit_device",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/devices/{device_id}/tags": {
+      "get": {
+        "summary": "List tags on device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tags"
+          }
+        },
+        "x-permission": "view_device",
+        "tags": [
+          "Devices",
+          "Tags"
+        ]
+      },
+      "post": {
+        "summary": "Assign tag to device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignTagRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tag assigned"
+          }
+        },
+        "x-permission": "assign_device_tag",
+        "tags": [
+          "Devices",
+          "Tags"
+        ]
+      }
+    },
+    "/devices/{device_id}/tags/{tag_id}": {
+      "delete": {
+        "summary": "Remove tag from device",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/deviceId"
+          },
+          {
+            "$ref": "#/components/parameters/tagId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tag removed"
+          }
+        },
+        "x-permission": "remove_device_tag",
+        "tags": [
+          "Devices",
+          "Tags"
+        ]
+      }
+    },
+    "/devices/by-tag/{tag_identifier}": {
+      "get": {
+        "summary": "List devices by tag name or ID",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/tagIdentifier"
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "simple"
+              ]
+            },
+            "description": "simple returns [{device, ip}] array for devices with at least one IP"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Devices (format varies by format param)"
+          }
+        },
+        "x-permission": "view_devices",
+        "tags": [
+          "Devices",
+          "Tags"
+        ]
+      }
+    },
+    "/subnets": {
+      "get": {
+        "summary": "List subnets",
+        "parameters": [
+          {
+            "name": "include",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "utilization"
+              ]
+            },
+            "description": "Include utilization stats when set to utilization"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subnet list"
+          }
+        },
+        "x-permission": "view_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      },
+      "post": {
+        "summary": "Create subnet",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubnetCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Subnet created"
+          }
+        },
+        "x-permission": "add_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      }
+    },
+    "/subnets/{subnet_id}": {
+      "get": {
+        "summary": "Get subnet with IP addresses",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subnet detail"
+          }
+        },
+        "x-permission": "view_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      },
+      "put": {
+        "summary": "Update subnet",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubnetUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Subnet updated"
+          }
+        },
+        "x-permission": "edit_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      },
+      "delete": {
+        "summary": "Delete subnet",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subnet deleted"
+          }
+        },
+        "x-permission": "delete_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      }
+    },
+    "/subnets/{subnet_id}/next_free_ip": {
+      "get": {
+        "summary": "First available IP outside DHCP pools",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Next free IP"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-permission": "view_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      }
+    },
+    "/subnets/{subnet_id}/available-ips": {
+      "get": {
+        "summary": "All unassigned IPs outside DHCP pools",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Available IPs"
+          }
+        },
+        "x-permission": "view_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      }
+    },
+    "/subnets/{subnet_id}/export": {
+      "get": {
+        "summary": "Export subnet as CSV",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV file",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        },
+        "x-permission": "export_subnet_csv",
+        "tags": [
+          "Subnets"
+        ]
+      }
+    },
+    "/subnets/{subnet_id}/custom-fields": {
+      "patch": {
+        "summary": "Update subnet custom field values",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldsPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fields updated"
+          }
+        },
+        "x-permission": "edit_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      }
+    },
+    "/subnets/{subnet_id}/dhcp": {
+      "get": {
+        "summary": "Get DHCP pools for subnet",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DHCP pools"
+          }
+        },
+        "x-permission": "view_dhcp",
+        "tags": [
+          "DHCP"
+        ]
+      },
+      "post": {
+        "summary": "Configure or remove DHCP pool",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/subnetId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DhcpConfigure"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "DHCP configured or removed"
+          }
+        },
+        "x-permission": "configure_dhcp",
+        "tags": [
+          "DHCP"
+        ]
+      }
+    },
+    "/ip-addresses/{ip_id}": {
+      "patch": {
+        "summary": "Update IP address notes",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ipId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IpNotesPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Notes updated"
+          }
+        },
+        "x-permission": "edit_subnet",
+        "tags": [
+          "IP Addresses"
+        ]
+      }
+    },
+    "/ips/{ip_address}/history": {
+      "get": {
+        "summary": "IP assignment history",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ipAddress"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History for IP"
+          }
+        },
+        "x-permission": "view_subnet",
+        "tags": [
+          "IP Addresses"
+        ]
+      }
+    },
+    "/tags": {
+      "get": {
+        "summary": "List tags",
+        "responses": {
+          "200": {
+            "description": "Tag list"
+          }
+        },
+        "x-permission": "view_tags",
+        "tags": [
+          "Tags"
+        ]
+      },
+      "post": {
+        "summary": "Create tag",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Tag created"
+          }
+        },
+        "x-permission": "add_tag",
+        "tags": [
+          "Tags"
+        ]
+      }
+    },
+    "/tags/{tag_id}": {
+      "get": {
+        "summary": "Get tag with devices",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/tagId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tag detail"
+          }
+        },
+        "x-permission": "view_tags",
+        "tags": [
+          "Tags"
+        ]
+      },
+      "put": {
+        "summary": "Update tag",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/tagId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tag updated"
+          }
+        },
+        "x-permission": "edit_tag",
+        "tags": [
+          "Tags"
+        ]
+      },
+      "delete": {
+        "summary": "Delete tag",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/tagId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tag deleted"
+          }
+        },
+        "x-permission": "delete_tag",
+        "tags": [
+          "Tags"
+        ]
+      }
+    },
+    "/racks": {
+      "get": {
+        "summary": "List racks",
+        "responses": {
+          "200": {
+            "description": "Rack list with devices"
+          }
+        },
+        "x-permission": "view_racks",
+        "tags": [
+          "Racks"
+        ]
+      },
+      "post": {
+        "summary": "Create rack",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RackCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Rack created"
+          }
+        },
+        "x-permission": "add_rack",
+        "tags": [
+          "Racks"
+        ]
+      }
+    },
+    "/racks/{rack_id}": {
+      "get": {
+        "summary": "Get rack",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/rackId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rack detail"
+          }
+        },
+        "x-permission": "view_rack",
+        "tags": [
+          "Racks"
+        ]
+      },
+      "put": {
+        "summary": "Update rack",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/rackId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RackUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rack updated"
+          }
+        },
+        "x-permission": "add_rack",
+        "tags": [
+          "Racks"
+        ]
+      },
+      "delete": {
+        "summary": "Delete rack",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/rackId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rack deleted"
+          }
+        },
+        "x-permission": "delete_rack",
+        "tags": [
+          "Racks"
+        ]
+      }
+    },
+    "/racks/{rack_id}/devices": {
+      "post": {
+        "summary": "Add device to rack position",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/rackId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RackDeviceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Device placed in rack"
+          }
+        },
+        "x-permission": "add_device_to_rack",
+        "tags": [
+          "Racks"
+        ]
+      }
+    },
+    "/racks/{rack_id}/devices/{rack_device_id}": {
+      "delete": {
+        "summary": "Remove device from rack",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/rackId"
+          },
+          {
+            "$ref": "#/components/parameters/rackDeviceId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed from rack"
+          }
+        },
+        "x-permission": "remove_device_from_rack",
+        "tags": [
+          "Racks"
+        ]
+      }
+    },
+    "/racks/{rack_id}/export": {
+      "get": {
+        "summary": "Export rack layout as CSV",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/rackId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV file",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        },
+        "x-permission": "export_rack_csv",
+        "tags": [
+          "Racks"
+        ]
+      }
+    },
+    "/custom_fields/{entity_type}": {
+      "get": {
+        "summary": "List custom field definitions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityType"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Field definitions"
+          }
+        },
+        "x-permission": "view_custom_fields",
+        "tags": [
+          "Custom Fields"
+        ]
+      }
+    },
+    "/custom_fields": {
+      "post": {
+        "summary": "Create custom field definition",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Field created"
+          }
+        },
+        "x-permission": "manage_custom_fields",
+        "tags": [
+          "Custom Fields"
+        ]
+      }
+    },
+    "/custom_fields/{field_id}": {
+      "put": {
+        "summary": "Update custom field definition",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/fieldId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Field updated"
+          }
+        },
+        "x-permission": "manage_custom_fields",
+        "tags": [
+          "Custom Fields"
+        ]
+      },
+      "delete": {
+        "summary": "Delete custom field definition",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/fieldId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Field deleted"
+          }
+        },
+        "x-permission": "manage_custom_fields",
+        "tags": [
+          "Custom Fields"
+        ]
+      }
+    },
+    "/custom-fields/reorder": {
+      "post": {
+        "summary": "Reorder custom fields",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomFieldReorder"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order updated"
+          }
+        },
+        "x-permission": "manage_custom_fields",
+        "tags": [
+          "Custom Fields"
+        ]
+      }
+    },
+    "/audit/actions": {
+      "get": {
+        "summary": "List distinct audit action names",
+        "responses": {
+          "200": {
+            "description": "Action names"
+          }
+        },
+        "x-permission": "view_audit",
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/audit": {
+      "get": {
+        "summary": "Query audit log",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/auditLimit"
+          },
+          {
+            "$ref": "#/components/parameters/auditOffset"
+          },
+          {
+            "$ref": "#/components/parameters/auditUser"
+          },
+          {
+            "$ref": "#/components/parameters/auditAction"
+          },
+          {
+            "$ref": "#/components/parameters/auditFrom"
+          },
+          {
+            "$ref": "#/components/parameters/auditTo"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated audit entries with total count"
+          }
+        },
+        "x-permission": "view_audit",
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/audit/export": {
+      "get": {
+        "summary": "Export audit log as CSV",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/auditUser"
+          },
+          {
+            "$ref": "#/components/parameters/auditAction"
+          },
+          {
+            "$ref": "#/components/parameters/auditFrom"
+          },
+          {
+            "$ref": "#/components/parameters/auditTo"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV export",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        },
+        "x-permission": "view_audit",
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/users": {
+      "get": {
+        "summary": "List users",
+        "responses": {
+          "200": {
+            "description": "User list (API keys not included)"
+          }
+        },
+        "x-permission": "view_users",
+        "tags": [
+          "Users"
+        ]
+      },
+      "post": {
+        "summary": "Create user",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "User created"
+          }
+        },
+        "x-permission": "manage_users",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/users/{user_id}": {
+      "put": {
+        "summary": "Update user",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/userId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "User updated"
+          }
+        },
+        "x-permission": "manage_users",
+        "tags": [
+          "Users"
+        ]
+      },
+      "delete": {
+        "summary": "Delete user",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/userId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User deleted"
+          }
+        },
+        "x-permission": "manage_users",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/users/{user_id}/regenerate-api-key": {
+      "post": {
+        "summary": "Regenerate user API key",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/userId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New API key (shown once)"
+          }
+        },
+        "x-permission": "manage_users",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/roles": {
+      "get": {
+        "summary": "List roles with permissions",
+        "responses": {
+          "200": {
+            "description": "Roles"
+          }
+        },
+        "x-permission": "view_users",
+        "tags": [
+          "Roles"
+        ]
+      },
+      "post": {
+        "summary": "Create role",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Role created"
+          }
+        },
+        "x-permission": "manage_roles",
+        "tags": [
+          "Roles"
+        ]
+      }
+    },
+    "/roles/{role_id}": {
+      "put": {
+        "summary": "Update role",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/roleId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Role updated"
+          }
+        },
+        "x-permission": "manage_roles",
+        "tags": [
+          "Roles"
+        ]
+      },
+      "delete": {
+        "summary": "Delete role",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/roleId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role deleted"
+          }
+        },
+        "x-permission": "manage_roles",
+        "tags": [
+          "Roles"
+        ]
+      }
+    },
+    "/permissions": {
+      "get": {
+        "summary": "List all permissions",
+        "responses": {
+          "200": {
+            "description": "Permission definitions"
+          }
+        },
+        "x-permission": "manage_roles",
+        "tags": [
+          "Permissions"
+        ]
+      }
+    },
+    "/settings": {
+      "get": {
+        "summary": "Get organisation settings",
+        "responses": {
+          "200": {
+            "description": "org_name, org_logo, accent_color"
+          }
+        },
+        "x-permission": "view_settings",
+        "tags": [
+          "Settings"
+        ]
+      },
+      "put": {
+        "summary": "Update organisation settings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Settings saved"
+          }
+        },
+        "x-permission": "manage_settings",
+        "tags": [
+          "Settings"
+        ]
+      }
+    },
+    "/bulk/assign-ips": {
+      "post": {
+        "summary": "Bulk assign IPs to a device",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkAssignIps"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-IP success and failure lists"
+          }
+        },
+        "x-permission": "add_device_ip",
+        "tags": [
+          "Bulk"
+        ]
+      }
+    },
+    "/bulk/create-devices": {
+      "post": {
+        "summary": "Bulk create devices",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkCreateDevices"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-device success and failure lists"
+          }
+        },
+        "x-permission": "add_device",
+        "tags": [
+          "Bulk"
+        ]
+      }
+    },
+    "/bulk/assign-tags": {
+      "post": {
+        "summary": "Bulk assign tag to devices",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkAssignTags"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-device success and failure lists"
+          }
+        },
+        "x-permission": "assign_device_tag",
+        "tags": [
+          "Bulk"
+        ]
+      }
+    },
+    "/bulk/export-subnets": {
+      "post": {
+        "summary": "Export multiple subnets as CSV",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkExportSubnets"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Combined CSV export",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        },
+        "x-permission": "export_subnet_csv",
+        "tags": [
+          "Bulk"
+        ]
+      }
+    }
+  }
+}

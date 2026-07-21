@@ -135,9 +135,12 @@ async function delRole(id: number) {
     </div>
 
     <section v-if="tab === 'users'" class="mt-8">
-      <div class="mb-4 flex items-center justify-between">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 class="font-semibold text-accent">Users</h2>
-        <button v-if="auth.can('manage_users')" class="btn-primary text-sm" @click="openAddUser">Add user</button>
+        <div class="flex flex-wrap gap-2">
+          <a href="/api/docs" target="_blank" rel="noopener noreferrer" class="btn-secondary text-sm">API documentation</a>
+          <button v-if="auth.can('manage_users')" class="btn-primary text-sm" @click="openAddUser">Add user</button>
+        </div>
       </div>
       <ul class="space-y-2">
         <li

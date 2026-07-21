@@ -2925,14 +2925,14 @@ def api_dashboard():
             })
 
         cursor.execute('''
-            SELECT HOUR(timestamp) AS hour, COUNT(*) AS count
-            FROM AuditLog
-            WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            GROUP BY HOUR(timestamp)
-            ORDER BY hour
+            SELECT timestamp FROM AuditLog
+            WHERE timestamp >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
         ''')
-        activity_by_hour = {row['hour']: row['count'] for row in cursor.fetchall()}
-        activity = [{'hour': h, 'count': activity_by_hour.get(h, 0)} for h in range(24)]
+        activity = [
+            row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+            if hasattr(row['timestamp'], 'strftime') else str(row['timestamp'])
+            for row in cursor.fetchall()
+        ]
 
     return jsonify({
         'stats': {
@@ -3368,6 +3368,25 @@ def api_rack_export(rack_id):
     output.seek(0)
     return send_file(BytesIO(output.getvalue().encode('utf-8')), mimetype='text/csv',
                      as_attachment=True, download_name=f"{rack['name']}_rack.csv".replace(' ', '_'))
+
+
+# ── API documentation (OpenAPI + Swagger UI) ────────────────────────────────
+OPENAPI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'openapi.json')
+SWAGGER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'swagger.html')
+
+
+@app.route('/api/openapi.json')
+def api_openapi_spec():
+    if not os.path.isfile(OPENAPI_PATH):
+        return jsonify({'error': 'OpenAPI spec not found'}), 404
+    return send_file(OPENAPI_PATH, mimetype='application/json')
+
+
+@app.route('/api/docs')
+def api_docs():
+    if not os.path.isfile(SWAGGER_HTML):
+        return jsonify({'error': 'Swagger UI not found'}), 404
+    return send_file(SWAGGER_HTML)
 
 
 # ── SPA static files ──────────────────────────────────────────────────────────
