@@ -3370,6 +3370,25 @@ def api_rack_export(rack_id):
                      as_attachment=True, download_name=f"{rack['name']}_rack.csv".replace(' ', '_'))
 
 
+# ── API documentation (OpenAPI + Swagger UI) ────────────────────────────────
+OPENAPI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'openapi.json')
+SWAGGER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'swagger.html')
+
+
+@app.route('/api/openapi.json')
+def api_openapi_spec():
+    if not os.path.isfile(OPENAPI_PATH):
+        return jsonify({'error': 'OpenAPI spec not found'}), 404
+    return send_file(OPENAPI_PATH, mimetype='application/json')
+
+
+@app.route('/api/docs')
+def api_docs():
+    if not os.path.isfile(SWAGGER_HTML):
+        return jsonify({'error': 'Swagger UI not found'}), 404
+    return send_file(SWAGGER_HTML)
+
+
 # ── SPA static files ──────────────────────────────────────────────────────────
 STATIC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 DIST = os.path.join(STATIC_ROOT, 'dist')

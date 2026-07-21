@@ -10,7 +10,8 @@ LABEL org.opencontainers.image.vendor="JDB-NET"
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py db.py ./
+COPY app.py db.py openapi.json ./
+COPY static/swagger.html ./static/
 COPY --from=frontend /app/static/dist ./static/dist
 ARG VERSION=unknown
 ENV VERSION=${VERSION}
