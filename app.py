@@ -2925,14 +2925,14 @@ def api_dashboard():
             })
 
         cursor.execute('''
-            SELECT HOUR(timestamp) AS hour, COUNT(*) AS count
-            FROM AuditLog
-            WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-            GROUP BY HOUR(timestamp)
-            ORDER BY hour
+            SELECT timestamp FROM AuditLog
+            WHERE timestamp >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
         ''')
-        activity_by_hour = {row['hour']: row['count'] for row in cursor.fetchall()}
-        activity = [{'hour': h, 'count': activity_by_hour.get(h, 0)} for h in range(24)]
+        activity = [
+            row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+            if hasattr(row['timestamp'], 'strftime') else str(row['timestamp'])
+            for row in cursor.fetchall()
+        ]
 
     return jsonify({
         'stats': {

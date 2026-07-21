@@ -21,3 +21,14 @@ export function formatLocalTime(ts?: string | null, fallback = "—"): string {
   if (!d) return ts?.trim() || fallback;
   return d.toLocaleString();
 }
+
+/** Bucket audit timestamps from the last 24h by local hour of day (0–23). */
+export function bucketActivityByLocalHour(timestamps: string[]): { hour: number; count: number }[] {
+  const counts = new Array<number>(24).fill(0);
+  for (const ts of timestamps) {
+    const d = parseApiTimestamp(ts);
+    if (!d) continue;
+    counts[d.getHours()]++;
+  }
+  return counts.map((count, hour) => ({ hour, count }));
+}

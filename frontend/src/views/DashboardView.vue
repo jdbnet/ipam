@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from "vue";
 import { RouterLink } from "vue-router";
 import { Network, Wifi, Layers, Server } from "lucide-vue-next";
 import { api } from "@/api";
+import { bucketActivityByLocalHour } from "@/utils/datetime";
 
 interface DashboardStats {
   total_ips: number;
@@ -46,7 +47,7 @@ onMounted(async () => {
     const d = await api.dashboard();
     stats.value = d.stats;
     subnetOverview.value = d.subnet_overview;
-    activity.value = d.activity;
+    activity.value = bucketActivityByLocalHour(d.activity);
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to load dashboard";
   } finally {
