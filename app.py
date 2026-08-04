@@ -247,6 +247,22 @@ def require_permission(permission_name):
     return decorator
 
 
+def require_any_permission(*permission_names):
+    """Decorator: authenticated user must hold at least one listed permission."""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            user = resolve_auth()
+            if not user:
+                return jsonify({'error': 'Unauthorized'}), 401
+            if permission_names and not any(has_permission(name, user) for name in permission_names):
+                return jsonify({'error': 'Permission denied', 'permission': list(permission_names)}), 403
+            request.current_user = user
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+
 def require_auth(f):
     """Decorator: authenticated only (no specific permission)."""
     @wraps(f)
@@ -2456,7 +2472,7 @@ def api_delete_custom_field(field_id):
 
 # DHCP API
 @app.route('/api/v2/subnets/<int:subnet_id>/dhcp', methods=['GET'])
-@require_permission('view_dhcp')
+@require_any_permission('view_dhcp', 'configure_dhcp')
 def api_get_dhcp(subnet_id):
     """Get DHCP pools for a subnet"""
     from flask import current_app

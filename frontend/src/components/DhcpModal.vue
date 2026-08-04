@@ -20,6 +20,7 @@ const hasPool = ref(false);
 const form = ref({ start_ip: "", end_ip: "", excluded_ips: "" });
 
 const canEdit = () => auth.can("configure_dhcp");
+const canView = () => auth.can("view_dhcp") || auth.can("configure_dhcp");
 
 async function loadPool() {
   if (!props.subnetId) return;
@@ -37,7 +38,7 @@ async function loadPool() {
       form.value.excluded_ips = d.pools[0].excluded_ips || "";
     }
   } catch (e) {
-    if (auth.can("view_dhcp")) {
+    if (canView()) {
       err.value = e instanceof Error ? e.message : "Failed to load DHCP pool";
     }
   } finally {
@@ -47,9 +48,10 @@ async function loadPool() {
 
 watch(
   () => [props.open, props.subnetId] as const,
-  ([open]) => {
-    if (open) loadPool();
+  ([open, subnetId]) => {
+    if (open && subnetId) loadPool();
   },
+  { immediate: true },
 );
 
 async function save() {

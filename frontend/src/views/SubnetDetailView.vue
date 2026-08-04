@@ -133,7 +133,13 @@ function isDhcpRow(hostname?: string) {
         </table>
       </div>
       <IpHistoryModal :ip="historyIp" @close="historyIp = null" />
-      <DhcpModal :open="showDhcp" :subnet-id="subnet.id" @close="showDhcp = false" @saved="loadSubnet" />
     </template>
+    <DhcpModal
+      v-if="subnet"
+      :open="showDhcp"
+      :subnet-id="subnet.id"
+      @close="showDhcp = false"
+      @saved="loadSubnet"
+    />
   </div>
 </template>
