@@ -52,12 +52,12 @@ async function loadDevices() {
 }
 
 onMounted(async () => {
-  const [tagList, sn] = await Promise.all([api.tags(), api.subnets(false)]);
+  const [tagList, subnetData] = await Promise.all([api.tags(), api.subnets(false)]);
   tags.value = tagList.map((t) => t.name);
-  subnets.value = sn;
-  if (sn.length) {
-    addForm.value.site = sn[0].site || "Unassigned";
-    addForm.value.subnet_id = sn[0].id;
+  subnets.value = subnetData.items;
+  if (subnetData.items.length) {
+    addForm.value.site = subnetData.items[0].site || "Unassigned";
+    addForm.value.subnet_id = subnetData.items[0].id;
   }
   await loadDevices();
 });

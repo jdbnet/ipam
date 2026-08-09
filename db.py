@@ -1,3 +1,4 @@
+import json
 import os
 import hashlib
 import base64
@@ -316,6 +317,21 @@ def init_db(app=None):
     cursor.execute("SHOW COLUMNS FROM Subnet LIKE 'vlan_notes'")
     if not cursor.fetchone():
         cursor.execute('ALTER TABLE Subnet ADD COLUMN vlan_notes TEXT DEFAULT NULL')
+
+    cursor.execute("SHOW COLUMNS FROM Subnet LIKE 'sort_order'")
+    if not cursor.fetchone():
+        cursor.execute('ALTER TABLE Subnet ADD COLUMN sort_order INTEGER DEFAULT 0')
+        cursor.execute('SELECT DISTINCT site FROM Subnet')
+        for (site,) in cursor.fetchall():
+            cursor.execute(
+                'SELECT id FROM Subnet WHERE site <=> %s ORDER BY name',
+                (site,),
+            )
+            for order, (subnet_id,) in enumerate(cursor.fetchall()):
+                cursor.execute(
+                    'UPDATE Subnet SET sort_order = %s WHERE id = %s',
+                    (order, subnet_id),
+                )
     
     # Define all permissions with categories
     permissions = [
@@ -613,14 +629,18 @@ DEFAULT_ACCENT_COLOR = '#1ebe8a'
 ORG_NAME_KEY = 'org_name'
 ORG_LOGO_KEY = 'org_logo'
 ACCENT_COLOR_KEY = 'accent_color'
+SUBNET_SITE_ORDER_KEY = 'subnet_site_order'
 
 
 def get_setting(cursor, key):
     cursor.execute('SELECT value FROM Setting WHERE setting_key = %s', (key,))
     row = cursor.fetchone()
-    if not row or row[0] is None:
+    if not row:
         return ''
-    return row[0]
+    value = row['value'] if isinstance(row, dict) else row[0]
+    if value is None:
+        return ''
+    return value
 
 
 def set_setting(cursor, key, value):
@@ -629,6 +649,25 @@ def set_setting(cursor, key, value):
         'ON DUPLICATE KEY UPDATE value = %s',
         (key, value, value),
     )
+
+
+def get_subnet_site_order(cursor):
+    raw = get_setting(cursor, SUBNET_SITE_ORDER_KEY)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [str(s) for s in data]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return []
+
+
+def set_subnet_site_order(cursor, sites):
+    if not isinstance(sites, list):
+        raise ValueError('sites must be a list')
+    set_setting(cursor, SUBNET_SITE_ORDER_KEY, json.dumps([str(s) for s in sites]))
 
 
 def load_org_settings(app):

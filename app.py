@@ -49,6 +49,7 @@ app.config['VERSION'] = os.environ.get('VERSION', 'unknown')
 from db import (
     init_db, hash_password, get_db_connection, verify_password, generate_api_key,
     load_org_settings, save_org_settings, org_branding,
+    get_subnet_site_order, set_subnet_site_order,
 )
 
 # ── TOTP / 2FA helpers ───────────────────────────────────────────────────────
@@ -776,6 +777,124 @@ def normalize_site(site):
     return site if site else 'Unassigned'
 
 
+def site_display_rank(site, site_order):
+    """Sort key for site groups: saved order first, then Unassigned, then alpha."""
+    if site in site_order:
+        return (0, site_order.index(site))
+    if site == 'Unassigned':
+        return (1, 0)
+    return (2, site)
+
+
+def sort_subnets_by_layout(subnets, site_order):
+    return sorted(
+        subnets,
+        key=lambda s: (
+            site_display_rank(normalize_site(s.get('site')), site_order),
+            s.get('sort_order', 0),
+            (s.get('name') or '').lower(),
+        ),
+    )
+
+
+def derive_site_order(subnets, saved_order):
+    """Merge saved site order with any sites present in subnet data."""
+    present = {normalize_site(s.get('site')) for s in subnets}
+    ordered = [site for site in saved_order if site in present]
+    remaining = sorted(present - set(ordered), key=lambda s: (s != 'Unassigned', s.lower()))
+    return ordered + remaining
+
+
+def layout_site_label(site_raw):
+    if site_raw is None or str(site_raw).strip() in ('', 'Unassigned'):
+        return 'Unassigned'
+    return str(site_raw).strip()
+
+
+def layout_site_db(site_raw):
+    label = layout_site_label(site_raw)
+    return None if label == 'Unassigned' else label
+
+
+def fetch_subnet_layout_state(cursor):
+    cursor.execute('SELECT id, name, cidr, site, sort_order FROM Subnet')
+    subnets = {}
+    for row in cursor.fetchall():
+        subnets[row[0]] = {
+            'name': row[1],
+            'cidr': row[2],
+            'site': normalize_site(row[3]),
+            'sort_order': row[4] or 0,
+        }
+    return subnets, get_subnet_site_order(cursor)
+
+
+def audit_subnet_layout_changes(user_id, old_subnets, old_site_order, subnet_updates, new_site_order, conn):
+    """Write audit log entries for site order, cross-site moves, and within-site reorders."""
+    new_subnets = {}
+    for entry in subnet_updates:
+        subnet_id = int(entry['id'])
+        old = old_subnets.get(subnet_id)
+        if not old:
+            continue
+        new_subnets[subnet_id] = {
+            'name': old['name'],
+            'cidr': old['cidr'],
+            'site': layout_site_label(entry.get('site')),
+            'sort_order': int(entry.get('sort_order', 0)),
+        }
+
+    if old_site_order != new_site_order:
+        old_str = ', '.join(old_site_order) if old_site_order else '(default)'
+        new_str = ', '.join(new_site_order)
+        add_audit_log(
+            user_id,
+            'reorder_subnet_sites',
+            f"Updated site order: {old_str} → {new_str}",
+            conn=conn,
+        )
+
+    for subnet_id, new in new_subnets.items():
+        old = old_subnets[subnet_id]
+        if old['site'] != new['site']:
+            add_audit_log(
+                user_id,
+                'move_subnet_site',
+                f"Moved subnet {old['name']} ({old['cidr']}) from {old['site']} to {new['site']}",
+                subnet_id,
+                conn=conn,
+            )
+
+    sites = {info['site'] for info in old_subnets.values()} | {info['site'] for info in new_subnets.values()}
+    for site in sorted(sites, key=lambda s: (s != 'Unassigned', s.lower())):
+        old_order = [
+            sid for sid, _ in sorted(
+                ((sid, info) for sid, info in old_subnets.items() if info['site'] == site),
+                key=lambda item: (item[1]['sort_order'], item[1]['name'].lower()),
+            )
+        ]
+        new_order = [
+            sid for sid, _ in sorted(
+                ((sid, info) for sid, info in new_subnets.items() if info['site'] == site),
+                key=lambda item: (item[1]['sort_order'], item[1]['name'].lower()),
+            )
+        ]
+        unchanged = [sid for sid in old_order if sid in new_order and new_subnets[sid]['site'] == site]
+        if len(unchanged) < 2:
+            continue
+        old_names = [old_subnets[sid]['name'] for sid in unchanged]
+        new_names = [new_subnets[sid]['name'] for sid in sorted(
+            unchanged, key=lambda sid: (new_subnets[sid]['sort_order'], new_subnets[sid]['name'].lower()),
+        )]
+        if old_names != new_names:
+            add_audit_log(
+                user_id,
+                'reorder_subnets',
+                f"Reordered subnets in {site}: {', '.join(old_names)} → {', '.join(new_names)}",
+                conn=conn,
+            )
+
+
 def assign_ip_to_device(conn, device_id, ip_id, user_id):
     """Assign an IP to a device. Raises ValueError on failure."""
     cursor = conn.cursor()
@@ -877,10 +996,16 @@ def create_subnet_from_cidr(conn, name, cidr, site, vlan_id, vlan_description, v
     if network.prefixlen < 24:
         raise ValueError('Subnet must be /24 or smaller')
     cursor = conn.cursor()
+    site_value = site if site else None
     cursor.execute(
-        '''INSERT INTO Subnet (name, cidr, site, vlan_id, vlan_description, vlan_notes)
-           VALUES (%s, %s, %s, %s, %s, %s)''',
-        (name, cidr, site, vlan_id, vlan_description or None, vlan_notes or None),
+        'SELECT COALESCE(MAX(sort_order), -1) + 1 FROM Subnet WHERE site <=> %s',
+        (site_value,),
+    )
+    next_order = cursor.fetchone()[0]
+    cursor.execute(
+        '''INSERT INTO Subnet (name, cidr, site, vlan_id, vlan_description, vlan_notes, sort_order)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)''',
+        (name, cidr, site_value, vlan_id, vlan_description or None, vlan_notes or None, next_order),
     )
     subnet_id = cursor.lastrowid
     hosts = list(network.hosts())
@@ -1866,8 +1991,14 @@ def api_subnets():
     include_util = request.args.get('include') == 'utilization'
     with get_db_connection(current_app) as conn:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute('SELECT id, name, cidr, site, vlan_id, vlan_description, vlan_notes, custom_fields FROM Subnet ORDER BY site, name')
+        cursor.execute(
+            'SELECT id, name, cidr, site, vlan_id, vlan_description, vlan_notes, custom_fields, sort_order '
+            'FROM Subnet',
+        )
         subnets = cursor.fetchall()
+        saved_site_order = get_subnet_site_order(cursor)
+        site_order = derive_site_order(subnets, saved_site_order)
+        subnets = sort_subnets_by_layout(subnets, site_order)
         utils = get_all_subnet_utilizations(cursor) if include_util else {}
         for subnet in subnets:
             subnet['custom_fields'] = parse_custom_fields_json(subnet.pop('custom_fields', None))
@@ -1876,7 +2007,7 @@ def api_subnets():
                 subnet['utilization'] = u['percent']
                 subnet['total_ips'] = u['total']
                 subnet['used_ips'] = u['used']
-    return items_response(subnets)
+    return jsonify({'items': subnets, 'site_order': site_order})
 
 @app.route('/api/v2/subnets/<int:subnet_id>', methods=['GET'])
 @require_permission('view_subnet')
@@ -1980,6 +2111,58 @@ def api_add_subnet():
         'vlan_description': vlan_description if vlan_description else None,
         'vlan_notes': vlan_notes if vlan_notes else None
     }), 201
+
+@app.route('/api/v2/subnets/layout', methods=['POST'])
+@require_permission('edit_subnet')
+def api_subnets_layout():
+    """Persist site group order and per-subnet site/sort_order layout."""
+    data = json_body()
+    site_order = data.get('site_order')
+    subnet_updates = data.get('subnets')
+    if not isinstance(site_order, list) or not isinstance(subnet_updates, list):
+        return jsonify({'error': 'site_order and subnets arrays are required'}), 400
+
+    with get_db_connection(current_app) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM Subnet')
+        existing_ids = {row[0] for row in cursor.fetchall()}
+        update_ids = set()
+        for entry in subnet_updates:
+            if 'id' not in entry:
+                return jsonify({'error': 'Each subnet entry requires an id'}), 400
+            update_ids.add(int(entry['id']))
+
+        if update_ids != existing_ids:
+            return jsonify({'error': 'subnets must include every subnet'}), 400
+
+        old_subnets, old_site_order = fetch_subnet_layout_state(cursor)
+
+        for entry in subnet_updates:
+            subnet_id = int(entry['id'])
+            site = layout_site_db(entry.get('site'))
+            sort_order = int(entry.get('sort_order', 0))
+            cursor.execute(
+                'UPDATE Subnet SET site = %s, sort_order = %s WHERE id = %s',
+                (site, sort_order, subnet_id),
+            )
+
+        present_sites = set()
+        for entry in subnet_updates:
+            present_sites.add(layout_site_label(entry.get('site')))
+        pruned_order = [s for s in site_order if s in present_sites]
+        for site in sorted(present_sites - set(pruned_order), key=lambda s: (s != 'Unassigned', s.lower())):
+            pruned_order.append(site)
+        set_subnet_site_order(cursor, pruned_order)
+        audit_subnet_layout_changes(
+            get_current_user_id(),
+            old_subnets,
+            old_site_order,
+            subnet_updates,
+            pruned_order,
+            conn,
+        )
+        conn.commit()
+    return jsonify({'ok': True})
 
 @app.route('/api/v2/subnets/<int:subnet_id>', methods=['PUT'])
 @require_permission('edit_subnet')

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
-import { Menu, Search, X, Home, Server, Grid3x3, Settings, SlidersHorizontal, Users, Tag, Layers, FileText, User, Network } from "lucide-vue-next";
+import { Menu, Search, X, Home, Server, Grid3x3, SlidersHorizontal, Users, Tag, Layers, FileText, User, Network } from "lucide-vue-next";
 import { useAuthStore } from "@/stores/auth";
 import { api } from "@/api";
 
@@ -23,7 +23,6 @@ const nav = computed(() =>
     { to: "/racks", label: "Racks", icon: Grid3x3, perm: "view_racks" },
     { to: "/tags", label: "Tags", icon: Tag, perm: "view_tags" },
     { to: "/audit", label: "Audit", icon: FileText, perm: "view_audit" },
-    { to: "/subnets/manage", label: "Subnet Management", icon: Settings, perm: "view_admin" },
     { to: "/users", label: "Users", icon: Users, perm: "view_users" },
     { to: "/settings", label: "Settings", icon: SlidersHorizontal, perm: "view_settings" },
     { to: "/custom-fields", label: "Fields", icon: Layers, perm: "view_custom_fields" },

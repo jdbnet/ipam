@@ -1572,6 +1572,49 @@
         ]
       }
     },
+    "/subnets/layout": {
+      "post": {
+        "summary": "Persist site group and subnet sort layout",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["site_order", "subnets"],
+                "properties": {
+                  "site_order": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "subnets": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["id", "site", "sort_order"],
+                      "properties": {
+                        "id": { "type": "integer" },
+                        "site": { "type": "string" },
+                        "sort_order": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Layout saved"
+          }
+        },
+        "x-permission": "edit_subnet",
+        "tags": [
+          "Subnets"
+        ]
+      }
+    },
     "/subnets/{subnet_id}": {
       "get": {
         "summary": "Get subnet with IP addresses",

@@ -56,11 +56,17 @@ export interface Subnet {
   vlan_id?: number;
   vlan_description?: string;
   vlan_notes?: string;
+  sort_order?: number;
   utilization?: number;
   total_ips?: number;
   used_ips?: number;
   custom_fields?: Record<string, unknown>;
   ip_addresses?: SubnetIp[];
+}
+
+export interface SubnetsResponse {
+  items: Subnet[];
+  site_order: string[];
 }
 
 export interface SubnetIp {
@@ -251,11 +257,10 @@ export const api = {
     const d = await handle<{ items: unknown[] }>(await fetchApi(`/api/v2/devices/${deviceId}/ip-history`));
     return d.items;
   },
-  async subnets(includeUtil = true) {
-    const d = await handle<{ items: Subnet[] }>(
+  async subnets(includeUtil = true): Promise<SubnetsResponse> {
+    return handle<SubnetsResponse>(
       await fetchApi(`/api/v2/subnets${includeUtil ? "?include=utilization" : ""}`),
     );
-    return d.items;
   },
   async subnet(id: number) {
     return handle<Subnet>(await fetchApi(`/api/v2/subnets/${id}`));
@@ -268,6 +273,11 @@ export const api = {
   },
   async deleteSubnet(id: number) {
     return handle(await fetchApi(`/api/v2/subnets/${id}`, { method: "DELETE" }));
+  },
+  async reorderSubnetsLayout(body: { site_order: string[]; subnets: { id: number; site: string; sort_order: number }[] }) {
+    return handle(await fetchApi("/api/v2/subnets/layout", {
+      method: "POST", headers: jsonHeaders, body: JSON.stringify(body),
+    }));
   },
   async availableIps(subnetId: number) {
     const d = await handle<{ items: { id: number; ip: string }[] }>(await fetchApi(`/api/v2/subnets/${subnetId}/available-ips`));

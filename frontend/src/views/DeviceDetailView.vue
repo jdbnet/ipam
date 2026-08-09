@@ -54,7 +54,7 @@ async function loadDevice() {
       api.device(id),
       api.tags(),
       api.deviceIpHistory(id).catch(() => []),
-      api.subnets(false),
+      api.subnets(false).then((d) => d.items),
     ]);
     device.value = d;
     editName.value = d.name;
