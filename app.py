@@ -715,7 +715,12 @@ def get_dhcp_pool(cursor, subnet_id):
         'SELECT start_ip, end_ip, excluded_ips FROM DHCPPool WHERE subnet_id = %s',
         (subnet_id,),
     )
-    return cursor.fetchone()
+    row = cursor.fetchone()
+    if not row:
+        return None
+    if isinstance(row, dict):
+        return row['start_ip'], row['end_ip'], row['excluded_ips']
+    return row
 
 
 def is_ip_dhcp_reserved(cursor, subnet_id, ip):
@@ -731,7 +736,8 @@ def is_ip_dhcp_reserved(cursor, subnet_id, ip):
         'SELECT ip FROM IPAddress WHERE subnet_id = %s ORDER BY INET_ATON(ip)',
         (subnet_id,),
     )
-    for (pool_ip,) in cursor.fetchall():
+    for row in cursor.fetchall():
+        pool_ip = row['ip'] if isinstance(row, dict) else row[0]
         if pool_ip == start_ip:
             in_range = True
         if in_range and pool_ip not in excluded_list and pool_ip == ip:
@@ -1065,7 +1071,10 @@ def configure_dhcp_pool(cursor, subnet_id, start_ip, end_ip, excluded_ips, subne
     """Create or update a DHCP pool and mark IPs as DHCP-reserved."""
     excluded_ips = (excluded_ips or '').replace(' ', '')
     excluded_list = [ip for ip in excluded_ips.split(',') if ip]
-    cursor.execute('SELECT ip FROM IPAddress WHERE subnet_id = %s', (subnet_id,))
+    cursor.execute(
+        'SELECT ip FROM IPAddress WHERE subnet_id = %s ORDER BY INET_ATON(ip)',
+        (subnet_id,),
+    )
     all_ips = [row[0] for row in cursor.fetchall()]
     if start_ip not in all_ips or end_ip not in all_ips:
         raise ValueError('Start and End IP must be within the subnet.')
