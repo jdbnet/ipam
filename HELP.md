@@ -7,7 +7,7 @@
 - `MYSQL_PASSWORD`: Database password (default: password)
 - `MYSQL_DATABASE`: Database name (default: ipam)
 - `SECRET_KEY`: Flask secret key for sessions (**REQUIRED in production!**)
-- `NAME`: Organisation name displayed in header (default: JDB-NET)
+- `NAME`: Organisation name displayed in header (default: none, shown as IPAM)
 - `LOGO_PNG`: URL or path to organisation logo (default: JDB-NET logo)
 
 ### Database Setup

@@ -26,6 +26,13 @@ onMounted(() => {
 });
 
 watch(() => auth.org?.accent_color, applyAccentColor);
+watch(
+  () => auth.productName,
+  (name) => {
+    document.title = name;
+  },
+  { immediate: true },
+);
 
 </script>
 <template>

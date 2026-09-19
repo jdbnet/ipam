@@ -43,7 +43,7 @@ async function save() {
       <div>
         <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Organisation name</label>
         <input v-model="form.org_name" class="input-field" placeholder="Your Organisation" />
-        <p class="mt-1 text-xs text-slate-500">Shown as “{{ form.org_name || "Organisation" }} IPAM” in the sidebar.</p>
+        <p class="mt-1 text-xs text-slate-500">Shown as “{{ form.org_name.trim() ? `${form.org_name.trim()} IPAM` : "IPAM" }}” in the sidebar.</p>
       </div>
 
       <div>

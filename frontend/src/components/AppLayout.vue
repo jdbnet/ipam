@@ -102,7 +102,7 @@ onUnmounted(() => {
       <div class="flex h-14 shrink-0 items-center gap-2.5 border-b border-slate-200 px-4 dark:border-slate-800">
         <img v-if="auth.org.logo" :src="auth.org.logo" alt="" class="h-7 shrink-0 rounded" />
         <div class="min-w-0 flex-1 leading-tight">
-          <div class="truncate text-sm font-semibold">{{ auth.org.name }} IPAM</div>
+          <div class="truncate text-sm font-semibold">{{ auth.productName }}</div>
           <div class="text-xs text-slate-500">{{ auth.version }}</div>
         </div>
         <button class="lg:hidden" @click="sidebarOpen = false"><X class="h-5 w-5" /></button>
@@ -132,7 +132,7 @@ onUnmounted(() => {
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <header class="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 bg-surface-raised px-4 dark:border-slate-800">
         <button class="lg:hidden" @click="sidebarOpen = true"><Menu class="h-6 w-6" /></button>
-        <span class="font-semibold lg:hidden">{{ auth.org.name }} IPAM</span>
+        <span class="font-semibold lg:hidden">{{ auth.productName }}</span>
         <button
           class="ml-auto rounded-lg p-2 text-slate-600 transition hover:bg-surface-overlay hover:text-accent dark:text-slate-400"
           title="Search (/)"

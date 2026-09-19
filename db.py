@@ -623,7 +623,6 @@ def run_v2_migrations(cursor, conn):
     logging.info("v2 database migrations complete")
 
 
-DEFAULT_ORG_NAME = 'JDB-NET'
 DEFAULT_ORG_LOGO = 'https://assets.jdbnet.co.uk/projects/ipam.png'
 DEFAULT_ACCENT_COLOR = '#1ebe8a'
 ORG_NAME_KEY = 'org_name'
@@ -727,7 +726,7 @@ def org_branding(app=None):
     logo = (app.config.get('LOGO_PNG') or '').strip()
     accent = (app.config.get('ACCENT_COLOR') or '').strip()
     return {
-        'name': name or DEFAULT_ORG_NAME,
+        'name': name,
         'logo': logo or DEFAULT_ORG_LOGO,
         'accent_color': accent or DEFAULT_ACCENT_COLOR,
     }
