@@ -164,7 +164,7 @@ spec:
     spec:
       containers:
       - name: ipam
-        image: cr.jdbnet.co.uk/public/ipam:latest
+        image: ghcr.io/jdbnet/ipam:latest
         ports:
         - containerPort: 5000
         env:

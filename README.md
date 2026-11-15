@@ -1,6 +1,6 @@
 <div align="center">
 
-  <h1>JDB-NET IPAM</h1>
+  <h1>IPAM</h1>
 
   <p>Open source IP address management for homelabs, small businesses, and IT teams.</p>
 
@@ -8,13 +8,10 @@
     <a href="https://github.com/jdbnet/ipam/blob/main/LICENSE">
       <img src="https://img.shields.io/github/license/jdbnet/ipam" alt="License" />
     </a>
-    <a href="https://cr.jdbnet.co.uk">
-      <img src="https://img.shields.io/badge/container-cr.jdbnet.co.uk-blue" alt="Container" />
-    </a>
   </p>
 
   <p>
-    <a href="https://www.jdbnet.co.uk/product/ipam"><strong>☁️ Managed hosting from £8/month →</strong></a>
+    <a href="https://www.jdbnet.co.uk/product/ipam"><strong>☁️ Managed hosting from £8/month</strong></a>
   </p>
 </div>
 
@@ -46,7 +43,7 @@ Docker Compose file.
 ```yaml
 services:
   ipam:
-    image: cr.jdbnet.co.uk/public/ipam:latest
+    image: ghcr.io/jdbnet/ipam:latest
     container_name: ipam
     restart: unless-stopped
     ports:
